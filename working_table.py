@@ -456,3 +456,42 @@ print("deal companies", deal_cos.count())
 # MAGIC GROUP BY lead_tag, proposed_pool_id, win_family, is_win_dfv
 # MAGIC ORDER BY companies DESC
 # MAGIC ;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 4 — Staging write (Databricks → `public.ld_apply_batch`)
+# MAGIC
+# MAGIC Does **not** set `companies.poolId`. After this cell, run `apply_ld_apply_batch.sql` in Supabase.
+# MAGIC Skips Retention until deals exist. Skips sticky (`is_protected`).
+# MAGIC Seed DFV pools first (`seed_dfv_pools.sql`) if `EON_NOW` rows will be in the batch.
+# MAGIC Uses the password cell at the top — do not put a password in this cell.
+
+# COMMAND ----------
+
+# DBTITLE 1,write ld_apply_batch
+moves = spark.sql(
+    """
+    SELECT company_id, proposed_pool_id
+    FROM crm_load.new_crm.ld_working
+    WHERE is_protected = false
+      AND proposed_pool_id IS NOT NULL
+      AND current_pool_id IS DISTINCT FROM proposed_pool_id
+      AND lead_tag NOT IN ('PAST_RETENTION', 'RETENTION', 'UPSELLING')
+    """
+)
+print("rows", moves.count())
+
+(
+    moves.write.format("postgresql")
+    .option("host", PG_POOLER_HOST)
+    .option("port", "5432")
+    .option("database", "postgres")
+    .option("dbtable", "public.ld_apply_batch")
+    .option("user", PG_POOLER_USER)
+    .option("password", PG_PASSWORD)
+    .mode("overwrite")
+    .save()
+)
+print("batch table written")
+
