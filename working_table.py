@@ -56,6 +56,7 @@ for table in [
     "company_sites",
     "callbacks",
     "crm_pool",
+    "crm_pool_rule",
     "notes",
     "profiles",
     "crm_company_pool_audit",
@@ -394,8 +395,10 @@ print("deal companies", deal_cos.count())
 # MAGIC %md
 # MAGIC ## Step 3 — Propose pool
 # MAGIC
-# MAGIC `EON_NOW` → `ld_pool_eon_dfv` (E.ON DFV). In-window stays `ld_pool_eon`.
-# MAGIC Same split for BG / UB / Other. No supplier → Unassigned.
+# MAGIC Tag → **parent** shared pool via `crm_pool_rule` (snapshot).
+# MAGIC New pool = seed the pool + one rule row. No CASE edit.
+# MAGIC Custom split comes later: it reads that parent, then `crm_pool_split_policy`.
+# MAGIC Sticky still wins: callback / locked stay; complaint uses the rule.
 
 # COMMAND ----------
 
@@ -406,54 +409,54 @@ print("deal companies", deal_cos.count())
 
 # COMMAND ----------
 
+# DBTITLE 1,snapshot crm_pool_rule only
+# Needed if this session already snapshotted without crm_pool_rule.
+_rules = jdbc_table("public.crm_pool_rule")
+_rules.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+    "crm_load.new_crm.snap_crm_pool_rule"
+)
+print("crm_pool_rule", _rules.count())
+
+# COMMAND ----------
+
 # DBTITLE 1,fill proposed_pool_id
 # MAGIC %sql
 # MAGIC CREATE OR REPLACE TABLE crm_load.new_crm.ld_working AS
 # MAGIC SELECT
-# MAGIC   company_id,
-# MAGIC   current_pool_id,
-# MAGIC   lead_tag,
+# MAGIC   w.company_id,
+# MAGIC   w.current_pool_id,
+# MAGIC   w.lead_tag,
 # MAGIC   CASE
-# MAGIC     WHEN lead_tag = 'COMPLAINT' THEN 'ld_pool_complaint'
-# MAGIC     WHEN lead_tag = 'CALLBACK' THEN COALESCE(callback_owner_pool_id, current_pool_id)
-# MAGIC     WHEN lead_tag = 'LOCKED' THEN current_pool_id
-# MAGIC     WHEN is_protected THEN current_pool_id
-# MAGIC     WHEN lead_tag = 'PAST_RETENTION' THEN 'ld_pool_retention_ooc'
-# MAGIC     WHEN lead_tag = 'RETENTION' THEN 'ld_pool_retention'
-# MAGIC     WHEN lead_tag = 'UPSELLING' THEN 'ld_pool_upselling'
-# MAGIC     WHEN lead_tag = 'EON_NOW' THEN 'ld_pool_eon_dfv'
-# MAGIC     WHEN lead_tag = 'BG_NOW' THEN 'ld_pool_bg_dfv'
-# MAGIC     WHEN lead_tag = 'UB_NOW' THEN 'ld_pool_ub_dfv'
-# MAGIC     WHEN lead_tag = 'OTHER_NOW' THEN 'ld_pool_other_dfv'
-# MAGIC     WHEN lead_tag = 'EON_IN_WINDOW' THEN 'ld_pool_eon'
-# MAGIC     WHEN lead_tag = 'BG_IN_WINDOW' THEN 'ld_pool_bg'
-# MAGIC     WHEN lead_tag = 'UB_IN_WINDOW' THEN 'ld_pool_ub'
-# MAGIC     WHEN lead_tag = 'OTHER_IN_WINDOW' THEN 'ld_pool_other'
-# MAGIC     WHEN lead_tag IN ('PRE_WINDOW', 'UNASSIGNED') THEN 'ld_pool_unassigned'
-# MAGIC     ELSE 'ld_pool_unassigned'
+# MAGIC     WHEN w.lead_tag = 'CALLBACK' THEN COALESCE(w.callback_owner_pool_id, w.current_pool_id)
+# MAGIC     WHEN w.lead_tag = 'LOCKED' THEN w.current_pool_id
+# MAGIC     WHEN w.is_protected AND w.lead_tag <> 'COMPLAINT' THEN w.current_pool_id
+# MAGIC     ELSE COALESCE(r.`poolId`, 'ld_pool_unassigned')
 # MAGIC   END AS proposed_pool_id,
-# MAGIC   site_count,
-# MAGIC   win_provider_id,
-# MAGIC   win_provider_name,
-# MAGIC   win_family,
-# MAGIC   win_end_date,
-# MAGIC   win_contract_type,
-# MAGIC   is_win_dfv,
-# MAGIC   raw_days_left,
-# MAGIC   days_left,
-# MAGIC   last_deal_raw_days_left,
-# MAGIC   last_deal_days_left,
-# MAGIC   last_deal_days_since,
-# MAGIC   has_any_past_deal,
-# MAGIC   has_open_callback,
-# MAGIC   callback_owner_pool_id,
-# MAGIC   is_current_pool_locked,
-# MAGIC   is_gdpr_pool,
-# MAGIC   has_complaint_note,
-# MAGIC   has_complaint_transfer,
-# MAGIC   is_protected,
-# MAGIC   snapshot_at
-# MAGIC FROM ld_before_pool
+# MAGIC   w.site_count,
+# MAGIC   w.win_provider_id,
+# MAGIC   w.win_provider_name,
+# MAGIC   w.win_family,
+# MAGIC   w.win_end_date,
+# MAGIC   w.win_contract_type,
+# MAGIC   w.is_win_dfv,
+# MAGIC   w.raw_days_left,
+# MAGIC   w.days_left,
+# MAGIC   w.last_deal_raw_days_left,
+# MAGIC   w.last_deal_days_left,
+# MAGIC   w.last_deal_days_since,
+# MAGIC   w.has_any_past_deal,
+# MAGIC   w.has_open_callback,
+# MAGIC   w.callback_owner_pool_id,
+# MAGIC   w.is_current_pool_locked,
+# MAGIC   w.is_gdpr_pool,
+# MAGIC   w.has_complaint_note,
+# MAGIC   w.has_complaint_transfer,
+# MAGIC   w.is_protected,
+# MAGIC   w.snapshot_at
+# MAGIC FROM ld_before_pool w
+# MAGIC LEFT JOIN crm_load.new_crm.snap_crm_pool_rule r
+# MAGIC   ON r.tag = w.lead_tag
+# MAGIC  AND COALESCE(r.`isActive`, true) = true
 # MAGIC ;
 
 # COMMAND ----------
