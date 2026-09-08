@@ -102,34 +102,149 @@ contracts.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
     "crm_load.new_crm.snap_contracts"
 )
 
-# Deals may be empty until migration.
+# Last deal for Retention: Nightly path company → sites → meters → deals when those
+# keys exist. Clock stays contract endDate − today (no quotes). Dead meters / cancelled
+# status still not filtered (left off on purpose).
+
+def _col(df, *names):
+    mapping = {c.lower(): c for c in df.columns}
+    for name in names:
+        if name.lower() in mapping:
+            return mapping[name.lower()]
+    return None
+
+last_deals_schema = (
+    "company_id string, last_deal_raw_days_left int, "
+    "last_deal_days_left int, last_deal_days_since int"
+)
+empty_last = spark.createDataFrame([], last_deals_schema)
+empty_cos = spark.createDataFrame([], "company_id string")
+
+try:
+    meters = jdbc_table("public.meters")
+    meters.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_meters"
+    )
+    print("meters", meters.count(), "columns", meters.columns)
+except Exception as e:
+    meters = None
+    print("public.meters not ready:", str(e)[:200])
+
 deal_companies_dest = "crm_load.new_crm.snap_deal_companies"
+last_deals_dest = "crm_load.new_crm.ld_last_deals"
 try:
     deals = jdbc_table("public.deals")
-    deals.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("crm_load.new_crm.snap_deals")
+    deals.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_deals"
+    )
     print("deals", deals.count(), "columns", deals.columns)
-    cols = {c.lower(): c for c in deals.columns}
-    if "companyid" in cols:
-        deal_cos = (
-            deals.select(F.col(cols["companyid"]).alias("company_id"))
-            .where("company_id IS NOT NULL")
-            .distinct()
+
+    sites = spark.table("crm_load.new_crm.snap_company_sites")
+    contracts_s = spark.table("crm_load.new_crm.snap_contracts")
+    d_company = _col(deals, "companyId", "company_id")
+    d_site = _col(deals, "companySiteId", "company_site_id", "siteId")
+    d_meter = _col(deals, "meterId", "meter_id")
+    d_contract = _col(deals, "contractId", "contract_id")
+    d_signed = _col(deals, "signedAt", "signed_at")
+    d_created = _col(deals, "createdAt", "created_at")
+    s_id = _col(sites, "id")
+    s_co = _col(sites, "companyId", "company_id")
+    c_id = _col(contracts_s, "id")
+    c_end = _col(contracts_s, "endDate", "end_date")
+
+    ts_cols = [F.col(c) for c in (d_signed, d_created) if c]
+    deal_ts = F.coalesce(*ts_cols) if ts_cols else F.lit(None).cast("timestamp")
+    contract_expr = F.col(d_contract) if d_contract else F.lit(None).cast("string")
+
+    linked = None
+    path = "none"
+    if (
+        meters is not None
+        and d_meter
+        and s_id
+        and s_co
+    ):
+        m_id = _col(meters, "id")
+        m_site = _col(meters, "companySiteId", "company_site_id", "siteId", "site_id")
+        if m_id and m_site:
+            linked = (
+                deals.alias("d")
+                .join(meters.alias("m"), F.col(f"d.{d_meter}") == F.col(f"m.{m_id}"), "inner")
+                .join(sites.alias("s"), F.col(f"m.{m_site}") == F.col(f"s.{s_id}"), "inner")
+                .select(
+                    F.col(f"s.{s_co}").alias("company_id"),
+                    contract_expr.alias("contract_id"),
+                    deal_ts.alias("deal_ts"),
+                )
+            )
+            path = "company-site-meter-deal"
+    if linked is None and d_site and s_id and s_co:
+        linked = (
+            deals.alias("d")
+            .join(sites.alias("s"), F.col(f"d.{d_site}") == F.col(f"s.{s_id}"), "inner")
+            .select(
+                F.col(f"s.{s_co}").alias("company_id"),
+                contract_expr.alias("contract_id"),
+                deal_ts.alias("deal_ts"),
+            )
         )
-    elif "company_id" in cols:
-        deal_cos = (
-            deals.select(F.col(cols["company_id"]).alias("company_id"))
-            .where("company_id IS NOT NULL")
-            .distinct()
+        path = "company-site-deal"
+    if linked is None and d_company:
+        linked = deals.select(
+            F.col(d_company).alias("company_id"),
+            contract_expr.alias("contract_id"),
+            deal_ts.alias("deal_ts"),
         )
+        path = "company-deal"
+
+    print("last-deal path:", path)
+
+    if linked is None:
+        deal_cos = empty_cos
+        last_deal_df = empty_last
     else:
-        print("deals has no companyId yet — treating as empty")
-        deal_cos = spark.createDataFrame([], "company_id string")
+        if c_id and c_end:
+            linked = linked.join(
+                contracts_s.select(
+                    F.col(c_id).alias("_cid"),
+                    F.col(c_end).alias("end_date"),
+                ),
+                F.col("contract_id") == F.col("_cid"),
+                "left",
+            )
+        else:
+            linked = linked.withColumn("end_date", F.lit(None).cast("date"))
+
+        from pyspark.sql.window import Window
+
+        deal_cos = (
+            linked.where("company_id IS NOT NULL")
+            .select("company_id")
+            .distinct()
+        )
+        w = Window.partitionBy("company_id").orderBy(F.col("deal_ts").desc_nulls_last())
+        last_deal_df = (
+            linked.where("company_id IS NOT NULL")
+            .withColumn("rn", F.row_number().over(w))
+            .where("rn = 1")
+            .select(
+                "company_id",
+                F.datediff(F.col("end_date"), F.current_date()).alias("last_deal_raw_days_left"),
+                F.coalesce(F.datediff(F.col("end_date"), F.current_date()), F.lit(0)).alias(
+                    "last_deal_days_left"
+                ),
+                F.datediff(F.current_date(), F.col("deal_ts")).alias("last_deal_days_since"),
+            )
+        )
 except Exception as e:
     print("public.deals not ready:", str(e)[:240])
-    deal_cos = spark.createDataFrame([], "company_id string")
+    deal_cos = empty_cos
+    last_deal_df = empty_last
 
 deal_cos.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(deal_companies_dest)
+last_deal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(last_deals_dest)
 print("deal companies", deal_cos.count())
+print("last deals", last_deal_df.count())
 
 # COMMAND ----------
 
@@ -138,6 +253,8 @@ print("deal companies", deal_cos.count())
 # MAGIC
 # MAGIC `is_win_dfv` is the **winning** contract only (Nightly supplier filter).
 # MAGIC No supplier → Unassigned, never E.ON DFV.
+# MAGIC Last deal: snapshot prints `last-deal path` (`company-site-meter-deal` when meters exist).
+# MAGIC Days left is still that deal's `contracts.endDate` − today.
 
 # COMMAND ----------
 
@@ -225,22 +342,12 @@ print("deal companies", deal_cos.count())
 # MAGIC   WHERE `poolId` = 'ld_pool_complaint'
 # MAGIC ),
 # MAGIC last_deals AS (
-# MAGIC   SELECT *
-# MAGIC   FROM (
-# MAGIC     SELECT
-# MAGIC       d.`companyId` AS company_id,
-# MAGIC       DATEDIFF(ct.`endDate`, CURRENT_DATE) AS last_deal_raw_days_left,
-# MAGIC       COALESCE(DATEDIFF(ct.`endDate`, CURRENT_DATE), 0) AS last_deal_days_left,
-# MAGIC       DATEDIFF(CURRENT_DATE, COALESCE(d.`signedAt`, d.`createdAt`)) AS last_deal_days_since,
-# MAGIC       ROW_NUMBER() OVER (
-# MAGIC         PARTITION BY d.`companyId`
-# MAGIC         ORDER BY COALESCE(d.`signedAt`, d.`createdAt`) DESC
-# MAGIC       ) AS rn
-# MAGIC     FROM crm_load.new_crm.snap_deals d
-# MAGIC     LEFT JOIN crm_load.new_crm.snap_contracts ct
-# MAGIC       ON d.`contractId` = ct.id
-# MAGIC   ) x
-# MAGIC   WHERE rn = 1
+# MAGIC   SELECT
+# MAGIC     company_id,
+# MAGIC     last_deal_raw_days_left,
+# MAGIC     last_deal_days_left,
+# MAGIC     last_deal_days_since
+# MAGIC   FROM crm_load.new_crm.ld_last_deals
 # MAGIC )
 # MAGIC SELECT
 # MAGIC   co.id                                            AS company_id,
