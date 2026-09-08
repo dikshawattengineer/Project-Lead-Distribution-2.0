@@ -5,6 +5,9 @@
 # MAGIC Snapshot CRM tables, then one SQL builds `ld_working`.
 # MAGIC Tag order: **sticky first** (Nightly), then Retention, then supplier.
 # MAGIC
+# MAGIC `*_NOW` = that supplier's expired / no CED / DFV → that supplier's DFV pool only.
+# MAGIC E.ON DFV is **not** a dump bag for every missing date.
+# MAGIC
 # MAGIC **Does not write `companies.poolId`.**
 
 # COMMAND ----------
@@ -62,6 +65,43 @@ for table in [
     df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dest)
     print(table, df.count())
 
+# Stamp DFV on the winning-contract type column (Nightly 1/2/4 or deemed/flexible/variable).
+contracts = spark.table("crm_load.new_crm.snap_contracts")
+col_by_lower = {c.lower(): c for c in contracts.columns}
+type_col = None
+for name in ("type", "contracttype", "contract_type", "tarifftype", "tariff", "producttype"):
+    if name in col_by_lower:
+        type_col = col_by_lower[name]
+        break
+
+if type_col:
+    raw = F.lower(F.trim(F.coalesce(F.col(type_col).cast("string"), F.lit(""))))
+    is_dfv = (
+        raw.isin("1", "2", "4", "deemed", "flexible", "variable", "d", "f", "v", "dfv", "fvd")
+        | raw.contains("deemed")
+        | raw.contains("flexible")
+        | raw.contains("variable")
+    )
+    contracts = (
+        contracts
+        .withColumn("ld_contract_type", F.col(type_col).cast("string"))
+        .withColumn("ld_is_dfv", is_dfv)
+    )
+    print("DFV type column:", type_col)
+    contracts.groupBy("ld_contract_type", "ld_is_dfv").count().show(50, False)
+else:
+    contracts = (
+        contracts
+        .withColumn("ld_contract_type", F.lit(None).cast("string"))
+        .withColumn("ld_is_dfv", F.lit(False))
+    )
+    print("No contract type column — DFV only from expired / no CED on that supplier")
+
+contracts.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+    "crm_load.new_crm.snap_contracts"
+)
+
+# Deals may be empty until migration.
 deal_companies_dest = "crm_load.new_crm.snap_deal_companies"
 try:
     deals = jdbc_table("public.deals")
@@ -94,6 +134,9 @@ print("deal companies", deal_cos.count())
 
 # MAGIC %md
 # MAGIC ## Working table (SQL)
+# MAGIC
+# MAGIC `is_win_dfv` is the **winning** contract only (Nightly supplier filter).
+# MAGIC No supplier → Unassigned, never E.ON DFV.
 
 # COMMAND ----------
 
@@ -109,6 +152,8 @@ print("deal companies", deal_cos.count())
 # MAGIC     DATEDIFF(c.`endDate`, CURRENT_DATE)   AS raw_days_left,
 # MAGIC     COALESCE(DATEDIFF(c.`endDate`, CURRENT_DATE), 0) AS days_left,
 # MAGIC     UPPER(c.`utilityType`)                AS utility_type,
+# MAGIC     c.`ld_contract_type`                  AS contract_type,
+# MAGIC     COALESCE(c.`ld_is_dfv`, false)        AS is_dfv,
 # MAGIC     CASE
 # MAGIC       WHEN LOWER(p.`displayName`) LIKE '%british gas lite%' THEN 'OTHER'
 # MAGIC       WHEN LOWER(p.`displayName`) LIKE '%british gas%'      THEN 'BG'
@@ -169,6 +214,24 @@ print("deal companies", deal_cos.count())
 # MAGIC   SELECT DISTINCT `companyId` AS company_id
 # MAGIC   FROM crm_load.new_crm.snap_crm_company_pool_audit
 # MAGIC   WHERE `poolId` = 'ld_pool_complaint'
+# MAGIC ),
+# MAGIC last_deals AS (
+# MAGIC   SELECT *
+# MAGIC   FROM (
+# MAGIC     SELECT
+# MAGIC       d.`companyId` AS company_id,
+# MAGIC       DATEDIFF(ct.`endDate`, CURRENT_DATE) AS last_deal_raw_days_left,
+# MAGIC       COALESCE(DATEDIFF(ct.`endDate`, CURRENT_DATE), 0) AS last_deal_days_left,
+# MAGIC       DATEDIFF(CURRENT_DATE, COALESCE(d.`signedAt`, d.`createdAt`)) AS last_deal_days_since,
+# MAGIC       ROW_NUMBER() OVER (
+# MAGIC         PARTITION BY d.`companyId`
+# MAGIC         ORDER BY COALESCE(d.`signedAt`, d.`createdAt`) DESC
+# MAGIC       ) AS rn
+# MAGIC     FROM crm_load.new_crm.snap_deals d
+# MAGIC     LEFT JOIN crm_load.new_crm.snap_contracts ct
+# MAGIC       ON d.`contractId` = ct.id
+# MAGIC   ) x
+# MAGIC   WHERE rn = 1
 # MAGIC )
 # MAGIC SELECT
 # MAGIC   co.id                                            AS company_id,
@@ -179,8 +242,13 @@ print("deal companies", deal_cos.count())
 # MAGIC   w.provider_name                                  AS win_provider_name,
 # MAGIC   w.family                                         AS win_family,
 # MAGIC   w.end_date                                       AS win_end_date,
+# MAGIC   w.contract_type                                  AS win_contract_type,
+# MAGIC   COALESCE(w.is_dfv, false)                        AS is_win_dfv,
 # MAGIC   w.raw_days_left,
 # MAGIC   w.days_left,
+# MAGIC   ld.last_deal_raw_days_left,
+# MAGIC   ld.last_deal_days_left,
+# MAGIC   ld.last_deal_days_since,
 # MAGIC   CASE WHEN d.company_id IS NOT NULL THEN true ELSE false END AS has_any_past_deal,
 # MAGIC   CASE WHEN cb.company_id IS NOT NULL THEN true ELSE false END AS has_open_callback,
 # MAGIC   cb.callback_owner_pool_id,
@@ -199,6 +267,7 @@ print("deal companies", deal_cos.count())
 # MAGIC LEFT JOIN sites s     ON co.id = s.company_id
 # MAGIC LEFT JOIN callbacks cb ON co.id = cb.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_deal_companies d ON co.id = d.company_id
+# MAGIC LEFT JOIN last_deals ld ON co.id = ld.company_id
 # MAGIC LEFT JOIN complaint_notes cn ON co.id = cn.company_id
 # MAGIC LEFT JOIN complaint_xfer xf ON co.id = xf.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_crm_pool pl ON co.`poolId` = pl.id
@@ -213,7 +282,8 @@ print("deal companies", deal_cos.count())
 # MAGIC   SUM(CASE WHEN has_complaint_note THEN 1 ELSE 0 END) AS complaint_notes,
 # MAGIC   SUM(CASE WHEN has_complaint_transfer THEN 1 ELSE 0 END) AS complaint_transfers,
 # MAGIC   SUM(CASE WHEN is_current_pool_locked OR is_gdpr_pool THEN 1 ELSE 0 END) AS locked_or_gdpr,
-# MAGIC   SUM(CASE WHEN has_any_past_deal THEN 1 ELSE 0 END) AS with_past_deal
+# MAGIC   SUM(CASE WHEN has_any_past_deal THEN 1 ELSE 0 END) AS with_past_deal,
+# MAGIC   SUM(CASE WHEN is_win_dfv THEN 1 ELSE 0 END) AS win_dfv
 # MAGIC FROM crm_load.new_crm.ld_working
 # MAGIC ;
 
@@ -221,6 +291,9 @@ print("deal companies", deal_cos.count())
 
 # MAGIC %md
 # MAGIC ## Step 2 — Tag (sticky first)
+# MAGIC
+# MAGIC `*_NOW` = winning supplier is DFV **or** expired **or** no CED.
+# MAGIC `win_family IS NULL` stays `UNASSIGNED` — not E.ON DFV.
 
 # COMMAND ----------
 
@@ -246,12 +319,12 @@ print("deal companies", deal_cos.count())
 # MAGIC     WHEN is_current_pool_locked OR is_gdpr_pool THEN 'LOCKED'
 # MAGIC     WHEN has_any_past_deal THEN
 # MAGIC       CASE
-# MAGIC         WHEN raw_days_left IS NULL OR days_left < 1 THEN 'PAST_RETENTION'
-# MAGIC         WHEN days_left <= 365 THEN 'RETENTION'
+# MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN 'PAST_RETENTION'
+# MAGIC         WHEN last_deal_days_left <= 540 THEN 'RETENTION'
 # MAGIC         ELSE 'UPSELLING'
 # MAGIC       END
 # MAGIC     WHEN win_family IS NULL THEN 'UNASSIGNED'
-# MAGIC     WHEN raw_days_left IS NULL OR days_left <= 0 THEN
+# MAGIC     WHEN is_win_dfv OR raw_days_left IS NULL OR days_left <= 0 THEN
 # MAGIC       CASE win_family
 # MAGIC         WHEN 'EON' THEN 'EON_NOW'
 # MAGIC         WHEN 'BG'  THEN 'BG_NOW'
@@ -272,8 +345,13 @@ print("deal companies", deal_cos.count())
 # MAGIC   win_provider_name,
 # MAGIC   win_family,
 # MAGIC   win_end_date,
+# MAGIC   win_contract_type,
+# MAGIC   is_win_dfv,
 # MAGIC   raw_days_left,
 # MAGIC   days_left,
+# MAGIC   last_deal_raw_days_left,
+# MAGIC   last_deal_days_left,
+# MAGIC   last_deal_days_since,
 # MAGIC   has_any_past_deal,
 # MAGIC   has_open_callback,
 # MAGIC   callback_owner_pool_id,
@@ -297,9 +375,9 @@ print("deal companies", deal_cos.count())
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT lead_tag, is_protected, COUNT(*) AS companies
+# MAGIC SELECT lead_tag, is_win_dfv, is_protected, COUNT(*) AS companies
 # MAGIC FROM crm_load.new_crm.ld_working
-# MAGIC GROUP BY lead_tag, is_protected
+# MAGIC GROUP BY lead_tag, is_win_dfv, is_protected
 # MAGIC ORDER BY companies DESC
 # MAGIC ;
 
@@ -307,6 +385,9 @@ print("deal companies", deal_cos.count())
 
 # MAGIC %md
 # MAGIC ## Step 3 — Propose pool
+# MAGIC
+# MAGIC `EON_NOW` → `ld_pool_eon_dfv` (E.ON DFV). In-window stays `ld_pool_eon`.
+# MAGIC Same split for BG / UB / Other. No supplier → Unassigned.
 
 # COMMAND ----------
 
@@ -332,10 +413,14 @@ print("deal companies", deal_cos.count())
 # MAGIC     WHEN lead_tag = 'PAST_RETENTION' THEN 'ld_pool_retention_ooc'
 # MAGIC     WHEN lead_tag = 'RETENTION' THEN 'ld_pool_retention'
 # MAGIC     WHEN lead_tag = 'UPSELLING' THEN 'ld_pool_upselling'
-# MAGIC     WHEN lead_tag IN ('EON_NOW', 'EON_IN_WINDOW') THEN 'ld_pool_eon'
-# MAGIC     WHEN lead_tag IN ('BG_NOW', 'BG_IN_WINDOW') THEN 'ld_pool_bg'
-# MAGIC     WHEN lead_tag IN ('UB_NOW', 'UB_IN_WINDOW') THEN 'ld_pool_ub'
-# MAGIC     WHEN lead_tag IN ('OTHER_NOW', 'OTHER_IN_WINDOW') THEN 'ld_pool_other'
+# MAGIC     WHEN lead_tag = 'EON_NOW' THEN 'ld_pool_eon_dfv'
+# MAGIC     WHEN lead_tag = 'BG_NOW' THEN 'ld_pool_bg_dfv'
+# MAGIC     WHEN lead_tag = 'UB_NOW' THEN 'ld_pool_ub_dfv'
+# MAGIC     WHEN lead_tag = 'OTHER_NOW' THEN 'ld_pool_other_dfv'
+# MAGIC     WHEN lead_tag = 'EON_IN_WINDOW' THEN 'ld_pool_eon'
+# MAGIC     WHEN lead_tag = 'BG_IN_WINDOW' THEN 'ld_pool_bg'
+# MAGIC     WHEN lead_tag = 'UB_IN_WINDOW' THEN 'ld_pool_ub'
+# MAGIC     WHEN lead_tag = 'OTHER_IN_WINDOW' THEN 'ld_pool_other'
 # MAGIC     WHEN lead_tag IN ('PRE_WINDOW', 'UNASSIGNED') THEN 'ld_pool_unassigned'
 # MAGIC     ELSE 'ld_pool_unassigned'
 # MAGIC   END AS proposed_pool_id,
@@ -344,8 +429,13 @@ print("deal companies", deal_cos.count())
 # MAGIC   win_provider_name,
 # MAGIC   win_family,
 # MAGIC   win_end_date,
+# MAGIC   win_contract_type,
+# MAGIC   is_win_dfv,
 # MAGIC   raw_days_left,
 # MAGIC   days_left,
+# MAGIC   last_deal_raw_days_left,
+# MAGIC   last_deal_days_left,
+# MAGIC   last_deal_days_since,
 # MAGIC   has_any_past_deal,
 # MAGIC   has_open_callback,
 # MAGIC   callback_owner_pool_id,
@@ -361,8 +451,8 @@ print("deal companies", deal_cos.count())
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT lead_tag, proposed_pool_id, COUNT(*) AS companies
+# MAGIC SELECT lead_tag, proposed_pool_id, win_family, is_win_dfv, COUNT(*) AS companies
 # MAGIC FROM crm_load.new_crm.ld_working
-# MAGIC GROUP BY lead_tag, proposed_pool_id
+# MAGIC GROUP BY lead_tag, proposed_pool_id, win_family, is_win_dfv
 # MAGIC ORDER BY companies DESC
 # MAGIC ;
