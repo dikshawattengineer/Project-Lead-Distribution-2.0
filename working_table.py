@@ -234,8 +234,8 @@ last_deal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTab
 print("deal companies", deal_cos.count())
 print("last deals", last_deal_df.count())
 
-# Rejected deals (compliance or deal.status) and companies whose meters are all de-energised.
-# Both stay put — Nightly hasRejectedDeal / isExclusivelyDeEnergised.
+# Nightly: hasRejectedDeal blocks Retention only (supplier bags still allowed).
+# isExclusivelyDeEnergised blocks supplier bags only (segment 0 / Unassigned).
 rejected_dest = "crm_load.new_crm.snap_rejected_deal_companies"
 dead_dest = "crm_load.new_crm.snap_exclusively_deenergised"
 rejected = empty_cos
@@ -497,13 +497,13 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       THEN 'COMPLAINT'
 # MAGIC     WHEN COALESCE(has_open_callback, false) THEN 'CALLBACK'
 # MAGIC     WHEN COALESCE(is_current_pool_locked, false) OR COALESCE(is_gdpr_pool, false) THEN 'LOCKED'
-# MAGIC     WHEN COALESCE(has_rejected_deal, false) OR COALESCE(is_exclusively_deenergised, false) THEN 'LOCKED'
 # MAGIC     WHEN has_any_past_deal AND NOT COALESCE(has_rejected_deal, false) THEN
 # MAGIC       CASE
 # MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN 'PAST_RETENTION'
 # MAGIC         WHEN last_deal_days_left <= 540 THEN 'RETENTION'
 # MAGIC         ELSE 'UPSELLING'
 # MAGIC       END
+# MAGIC     WHEN COALESCE(is_exclusively_deenergised, false) THEN 'UNASSIGNED'
 # MAGIC     WHEN win_family IS NULL THEN 'UNASSIGNED'
 # MAGIC     WHEN is_win_dfv OR raw_days_left IS NULL OR days_left <= 0 THEN
 # MAGIC       CASE win_family
@@ -549,8 +549,6 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC     OR COALESCE(has_open_callback, false)
 # MAGIC     OR COALESCE(is_current_pool_locked, false)
 # MAGIC     OR COALESCE(is_gdpr_pool, false)
-# MAGIC     OR COALESCE(has_rejected_deal, false)
-# MAGIC     OR COALESCE(is_exclusively_deenergised, false)
 # MAGIC   ) AS is_protected,
 # MAGIC   CAST(NULL AS STRING) AS proposed_pool_id,
 # MAGIC   snapshot_at
