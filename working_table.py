@@ -234,6 +234,76 @@ last_deal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTab
 print("deal companies", deal_cos.count())
 print("last deals", last_deal_df.count())
 
+# Rejected deals (compliance or deal.status) and companies whose meters are all de-energised.
+# Both stay put — Nightly hasRejectedDeal / isExclusivelyDeEnergised.
+rejected_dest = "crm_load.new_crm.snap_rejected_deal_companies"
+dead_dest = "crm_load.new_crm.snap_exclusively_deenergised"
+rejected = empty_cos
+
+try:
+    deals_s = spark.table("crm_load.new_crm.snap_deals")
+    d_co = _col(deals_s, "companyId")
+    d_id = _col(deals_s, "id")
+    d_st = _col(deals_s, "status")
+    parts = []
+    reject_re = r"reject|declin|cancel"
+    if d_co and d_st:
+        parts.append(
+            deals_s.where(F.lower(F.col(d_st).cast("string")).rlike(reject_re)).select(
+                F.col(d_co).alias("company_id")
+            )
+        )
+    try:
+        cre = jdbc_table("public.compliance_review_entries")
+        cre.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+            "crm_load.new_crm.snap_compliance_review_entries"
+        )
+        print("compliance_review_entries", cre.count())
+        c_deal = _col(cre, "dealId")
+        c_st = _col(cre, "status")
+        if c_deal and c_st and d_id and d_co:
+            parts.append(
+                cre.where(F.lower(F.col(c_st).cast("string")).rlike(reject_re))
+                .join(deals_s, F.col(c_deal) == F.col(d_id), "inner")
+                .select(F.col(d_co).alias("company_id"))
+            )
+    except Exception as e:
+        print("compliance_review_entries not ready:", str(e)[:200])
+    if parts:
+        rejected = parts[0]
+        for extra in parts[1:]:
+            rejected = rejected.unionByName(extra)
+        rejected = rejected.where("company_id IS NOT NULL").distinct()
+except Exception as e:
+    print("rejected deals skip:", str(e)[:200])
+
+rejected.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(rejected_dest)
+print("rejected deal companies", rejected.count())
+
+meters = spark.table("crm_load.new_crm.snap_site_meters")
+sites_s = spark.table("crm_load.new_crm.snap_company_sites")
+m_site = _col(meters, "companySiteId")
+m_dead = _col(meters, "isDeEnergised")
+s_id = _col(sites_s, "id")
+s_co = _col(sites_s, "companyId")
+if m_site and m_dead and s_id and s_co:
+    dead = (
+        meters.alias("m")
+        .join(sites_s.alias("s"), F.col(f"m.{m_site}") == F.col(f"s.{s_id}"), "inner")
+        .groupBy(F.col(f"s.{s_co}").alias("company_id"))
+        .agg(
+            F.count("*").alias("meters"),
+            F.sum(F.when(F.col(f"m.{m_dead}") == True, 0).otherwise(1)).alias("live_meters"),
+        )
+        .where("meters > 0 AND live_meters = 0")
+        .select("company_id")
+    )
+else:
+    dead = empty_cos
+    print("isDeEnergised not on site_meters — skip")
+dead.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dead_dest)
+print("exclusively de-energised companies", dead.count())
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -364,6 +434,8 @@ print("last deals", last_deal_df.count())
 # MAGIC   END AS is_gdpr_pool,
 # MAGIC   CASE WHEN cn.company_id IS NOT NULL THEN true ELSE false END AS has_complaint_note,
 # MAGIC   CASE WHEN xf.company_id IS NOT NULL THEN true ELSE false END AS has_complaint_transfer,
+# MAGIC   CASE WHEN rd.company_id IS NOT NULL THEN true ELSE false END AS has_rejected_deal,
+# MAGIC   CASE WHEN de.company_id IS NOT NULL THEN true ELSE false END AS is_exclusively_deenergised,
 # MAGIC   CAST(NULL AS STRING)                             AS proposed_pool_id,
 # MAGIC   CURRENT_TIMESTAMP()                              AS snapshot_at
 # MAGIC FROM crm_load.new_crm.snap_companies co
@@ -374,6 +446,8 @@ print("last deals", last_deal_df.count())
 # MAGIC LEFT JOIN last_deals ld ON co.id = ld.company_id
 # MAGIC LEFT JOIN complaint_notes cn ON co.id = cn.company_id
 # MAGIC LEFT JOIN complaint_xfer xf ON co.id = xf.company_id
+# MAGIC LEFT JOIN crm_load.new_crm.snap_rejected_deal_companies rd ON co.id = rd.company_id
+# MAGIC LEFT JOIN crm_load.new_crm.snap_exclusively_deenergised de ON co.id = de.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_crm_pool pl ON co.`poolId` = pl.id
 # MAGIC ;
 
@@ -387,7 +461,9 @@ print("last deals", last_deal_df.count())
 # MAGIC   SUM(CASE WHEN has_complaint_transfer THEN 1 ELSE 0 END) AS complaint_transfers,
 # MAGIC   SUM(CASE WHEN is_current_pool_locked OR is_gdpr_pool THEN 1 ELSE 0 END) AS locked_or_gdpr,
 # MAGIC   SUM(CASE WHEN has_any_past_deal THEN 1 ELSE 0 END) AS with_past_deal,
-# MAGIC   SUM(CASE WHEN is_win_dfv THEN 1 ELSE 0 END) AS win_dfv
+# MAGIC   SUM(CASE WHEN is_win_dfv THEN 1 ELSE 0 END) AS win_dfv,
+# MAGIC   SUM(CASE WHEN has_rejected_deal THEN 1 ELSE 0 END) AS rejected_deals,
+# MAGIC   SUM(CASE WHEN is_exclusively_deenergised THEN 1 ELSE 0 END) AS all_meters_dead
 # MAGIC FROM crm_load.new_crm.ld_working
 # MAGIC ;
 
@@ -421,7 +497,8 @@ print("last deals", last_deal_df.count())
 # MAGIC       THEN 'COMPLAINT'
 # MAGIC     WHEN COALESCE(has_open_callback, false) THEN 'CALLBACK'
 # MAGIC     WHEN COALESCE(is_current_pool_locked, false) OR COALESCE(is_gdpr_pool, false) THEN 'LOCKED'
-# MAGIC     WHEN has_any_past_deal THEN
+# MAGIC     WHEN COALESCE(has_rejected_deal, false) OR COALESCE(is_exclusively_deenergised, false) THEN 'LOCKED'
+# MAGIC     WHEN has_any_past_deal AND NOT COALESCE(has_rejected_deal, false) THEN
 # MAGIC       CASE
 # MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN 'PAST_RETENTION'
 # MAGIC         WHEN last_deal_days_left <= 540 THEN 'RETENTION'
@@ -463,6 +540,8 @@ print("last deals", last_deal_df.count())
 # MAGIC   is_gdpr_pool,
 # MAGIC   has_complaint_note,
 # MAGIC   has_complaint_transfer,
+# MAGIC   has_rejected_deal,
+# MAGIC   is_exclusively_deenergised,
 # MAGIC   (
 # MAGIC     COALESCE(has_complaint_note, false)
 # MAGIC     OR COALESCE(has_complaint_transfer, false)
@@ -470,6 +549,8 @@ print("last deals", last_deal_df.count())
 # MAGIC     OR COALESCE(has_open_callback, false)
 # MAGIC     OR COALESCE(is_current_pool_locked, false)
 # MAGIC     OR COALESCE(is_gdpr_pool, false)
+# MAGIC     OR COALESCE(has_rejected_deal, false)
+# MAGIC     OR COALESCE(is_exclusively_deenergised, false)
 # MAGIC   ) AS is_protected,
 # MAGIC   CAST(NULL AS STRING) AS proposed_pool_id,
 # MAGIC   snapshot_at
@@ -546,6 +627,8 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   w.is_gdpr_pool,
 # MAGIC   w.has_complaint_note,
 # MAGIC   w.has_complaint_transfer,
+# MAGIC   w.has_rejected_deal,
+# MAGIC   w.is_exclusively_deenergised,
 # MAGIC   w.is_protected,
 # MAGIC   w.snapshot_at
 # MAGIC FROM ld_before_pool w
