@@ -120,15 +120,19 @@ last_deals_schema = (
 empty_last = spark.createDataFrame([], last_deals_schema)
 empty_cos = spark.createDataFrame([], "company_id string")
 
-try:
-    meters = jdbc_table("public.meters")
-    meters.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_meters"
-    )
-    print("meters", meters.count(), "columns", meters.columns)
-except Exception as e:
-    meters = None
-    print("public.meters not ready:", str(e)[:200])
+meters = None
+for meter_table in ("site_meters", "meters"):
+    try:
+        meters = jdbc_table(f"public.{meter_table}")
+        meters.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+            "crm_load.new_crm.snap_meters"
+        )
+        print(meter_table, meters.count(), "columns", meters.columns)
+        break
+    except Exception:
+        meters = None
+if meters is None:
+    print("no meters table — last deal uses company → site → deal")
 
 deal_companies_dest = "crm_load.new_crm.snap_deal_companies"
 last_deals_dest = "crm_load.new_crm.ld_last_deals"
