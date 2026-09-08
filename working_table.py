@@ -54,6 +54,7 @@ for table in [
     "contracts",
     "providers",
     "company_sites",
+    "site_meters",
     "callbacks",
     "crm_pool",
     "crm_pool_rule",
@@ -102,9 +103,8 @@ contracts.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
     "crm_load.new_crm.snap_contracts"
 )
 
-# Last deal for Retention: Nightly path company → sites → meters → deals when those
-# keys exist. Clock stays contract endDate − today (no quotes). Dead meters / cancelled
-# status still not filtered (left off on purpose).
+# Last deal (Prisma): deals.siteMeterId → site_meters → company_sites → company.
+# Clock: that deal's contracts.endDate − today. Dead meters / cancelled still off.
 
 def _col(df, *names):
     mapping = {c.lower(): c for c in df.columns}
@@ -120,20 +120,6 @@ last_deals_schema = (
 empty_last = spark.createDataFrame([], last_deals_schema)
 empty_cos = spark.createDataFrame([], "company_id string")
 
-meters = None
-for meter_table in ("site_meters", "meters"):
-    try:
-        meters = jdbc_table(f"public.{meter_table}")
-        meters.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-            "crm_load.new_crm.snap_meters"
-        )
-        print(meter_table, meters.count(), "columns", meters.columns)
-        break
-    except Exception:
-        meters = None
-if meters is None:
-    print("no meters table — last deal uses company → site → deal")
-
 deal_companies_dest = "crm_load.new_crm.snap_deal_companies"
 last_deals_dest = "crm_load.new_crm.ld_last_deals"
 try:
@@ -144,17 +130,20 @@ try:
     print("deals", deals.count(), "columns", deals.columns)
 
     sites = spark.table("crm_load.new_crm.snap_company_sites")
+    site_meters = spark.table("crm_load.new_crm.snap_site_meters")
     contracts_s = spark.table("crm_load.new_crm.snap_contracts")
-    d_company = _col(deals, "companyId", "company_id")
-    d_site = _col(deals, "companySiteId", "company_site_id", "siteId")
-    d_meter = _col(deals, "meterId", "meter_id", "siteMeterId", "site_meter_id")
-    d_contract = _col(deals, "contractId", "contract_id")
-    d_signed = _col(deals, "signedAt", "signed_at")
-    d_created = _col(deals, "createdAt", "created_at")
+    d_company = _col(deals, "companyId")
+    d_site = _col(deals, "siteId")
+    d_meter = _col(deals, "siteMeterId")
+    d_contract = _col(deals, "contractId")
+    d_signed = _col(deals, "signedAt")
+    d_created = _col(deals, "createdAt")
     s_id = _col(sites, "id")
-    s_co = _col(sites, "companyId", "company_id")
+    s_co = _col(sites, "companyId")
+    m_id = _col(site_meters, "id")
+    m_site = _col(site_meters, "companySiteId")
     c_id = _col(contracts_s, "id")
-    c_end = _col(contracts_s, "endDate", "end_date")
+    c_end = _col(contracts_s, "endDate")
 
     def _deal_col(name):
         return F.col(f"d.{name}") if name else F.lit(None)
@@ -165,26 +154,18 @@ try:
 
     linked = None
     path = "none"
-    if (
-        meters is not None
-        and d_meter
-        and s_id
-        and s_co
-    ):
-        m_id = _col(meters, "id")
-        m_site = _col(meters, "companySiteId", "company_site_id", "siteId", "site_id")
-        if m_id and m_site:
-            linked = (
-                deals.alias("d")
-                .join(meters.alias("m"), F.col(f"d.{d_meter}") == F.col(f"m.{m_id}"), "inner")
-                .join(sites.alias("s"), F.col(f"m.{m_site}") == F.col(f"s.{s_id}"), "inner")
-                .select(
-                    F.col(f"s.{s_co}").alias("company_id"),
-                    contract_expr.alias("contract_id"),
-                    deal_ts.alias("deal_ts"),
-                )
+    if d_meter and m_id and m_site and s_id and s_co:
+        linked = (
+            deals.alias("d")
+            .join(site_meters.alias("m"), F.col(f"d.{d_meter}") == F.col(f"m.{m_id}"), "inner")
+            .join(sites.alias("s"), F.col(f"m.{m_site}") == F.col(f"s.{s_id}"), "inner")
+            .select(
+                F.col(f"s.{s_co}").alias("company_id"),
+                contract_expr.alias("contract_id"),
+                deal_ts.alias("deal_ts"),
             )
-            path = "company-site-meter-deal"
+        )
+        path = "company-site-meter-deal"
     if linked is None and d_site and s_id and s_co:
         linked = (
             deals.alias("d")
@@ -260,7 +241,7 @@ print("last deals", last_deal_df.count())
 # MAGIC
 # MAGIC `is_win_dfv` is the **winning** contract only (Nightly supplier filter).
 # MAGIC No supplier → Unassigned, never E.ON DFV.
-# MAGIC Last deal: snapshot prints `last-deal path` (`company-site-meter-deal` when meters exist).
+# MAGIC Last deal: Prisma `deals.siteMeterId` → `site_meters` → `company_sites`.
 # MAGIC Days left is still that deal's `contracts.endDate` − today.
 
 # COMMAND ----------
