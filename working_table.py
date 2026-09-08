@@ -143,7 +143,7 @@ try:
     contracts_s = spark.table("crm_load.new_crm.snap_contracts")
     d_company = _col(deals, "companyId", "company_id")
     d_site = _col(deals, "companySiteId", "company_site_id", "siteId")
-    d_meter = _col(deals, "meterId", "meter_id")
+    d_meter = _col(deals, "meterId", "meter_id", "siteMeterId", "site_meter_id")
     d_contract = _col(deals, "contractId", "contract_id")
     d_signed = _col(deals, "signedAt", "signed_at")
     d_created = _col(deals, "createdAt", "created_at")
@@ -152,9 +152,12 @@ try:
     c_id = _col(contracts_s, "id")
     c_end = _col(contracts_s, "endDate", "end_date")
 
-    ts_cols = [F.col(c) for c in (d_signed, d_created) if c]
+    def _deal_col(name):
+        return F.col(f"d.{name}") if name else F.lit(None)
+
+    ts_cols = [_deal_col(c) for c in (d_signed, d_created) if c]
     deal_ts = F.coalesce(*ts_cols) if ts_cols else F.lit(None).cast("timestamp")
-    contract_expr = F.col(d_contract) if d_contract else F.lit(None).cast("string")
+    contract_expr = _deal_col(d_contract)
 
     linked = None
     path = "none"
@@ -190,8 +193,8 @@ try:
         )
         path = "company-site-deal"
     if linked is None and d_company:
-        linked = deals.select(
-            F.col(d_company).alias("company_id"),
+        linked = deals.alias("d").select(
+            _deal_col(d_company).alias("company_id"),
             contract_expr.alias("contract_id"),
             deal_ts.alias("deal_ts"),
         )
