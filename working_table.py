@@ -152,8 +152,16 @@ print("deal companies", deal_cos.count())
 # MAGIC     DATEDIFF(c.`endDate`, CURRENT_DATE)   AS raw_days_left,
 # MAGIC     COALESCE(DATEDIFF(c.`endDate`, CURRENT_DATE), 0) AS days_left,
 # MAGIC     UPPER(c.`utilityType`)                AS utility_type,
-# MAGIC     c.`ld_contract_type`                  AS contract_type,
-# MAGIC     COALESCE(c.`ld_is_dfv`, false)        AS is_dfv,
+# MAGIC     CAST(c.`type` AS STRING)              AS contract_type,
+# MAGIC     CASE
+# MAGIC       WHEN LOWER(TRIM(COALESCE(CAST(c.`type` AS STRING), ''))) IN (
+# MAGIC         '1', '2', '4', 'deemed', 'flexible', 'variable', 'd', 'f', 'v', 'dfv', 'fvd'
+# MAGIC       )
+# MAGIC         OR LOWER(CAST(c.`type` AS STRING)) LIKE '%deemed%'
+# MAGIC         OR LOWER(CAST(c.`type` AS STRING)) LIKE '%flexible%'
+# MAGIC         OR LOWER(CAST(c.`type` AS STRING)) LIKE '%variable%'
+# MAGIC       THEN true ELSE false
+# MAGIC     END AS is_dfv,
 # MAGIC     CASE
 # MAGIC       WHEN LOWER(p.`displayName`) LIKE '%british gas lite%' THEN 'OTHER'
 # MAGIC       WHEN LOWER(p.`displayName`) LIKE '%british gas%'      THEN 'BG'
