@@ -5,8 +5,8 @@
 # MAGIC Snapshot CRM tables, then one SQL builds `ld_working`.
 # MAGIC Tag order: **sticky first** (Nightly), then Retention, then supplier.
 # MAGIC
-# MAGIC `*_NOW` = that supplier's expired / no CED / DFV → that supplier's DFV pool only.
-# MAGIC E.ON DFV is **not** a dump bag for every missing date.
+# MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): E.ON deemed/flexible/variable
+# MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
 # MAGIC
 # MAGIC **Does not write `companies.poolId`.**
 
@@ -415,12 +415,12 @@ print("last deals", last_deal_df.count())
 # MAGIC   company_id,
 # MAGIC   current_pool_id,
 # MAGIC   CASE
-# MAGIC     WHEN has_complaint_note
-# MAGIC       OR has_complaint_transfer
+# MAGIC     WHEN COALESCE(has_complaint_note, false)
+# MAGIC       OR COALESCE(has_complaint_transfer, false)
 # MAGIC       OR current_pool_id = 'ld_pool_complaint'
 # MAGIC       THEN 'COMPLAINT'
-# MAGIC     WHEN has_open_callback THEN 'CALLBACK'
-# MAGIC     WHEN is_current_pool_locked OR is_gdpr_pool THEN 'LOCKED'
+# MAGIC     WHEN COALESCE(has_open_callback, false) THEN 'CALLBACK'
+# MAGIC     WHEN COALESCE(is_current_pool_locked, false) OR COALESCE(is_gdpr_pool, false) THEN 'LOCKED'
 # MAGIC     WHEN has_any_past_deal THEN
 # MAGIC       CASE
 # MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN 'PAST_RETENTION'
@@ -464,12 +464,12 @@ print("last deals", last_deal_df.count())
 # MAGIC   has_complaint_note,
 # MAGIC   has_complaint_transfer,
 # MAGIC   (
-# MAGIC     has_complaint_note
-# MAGIC     OR has_complaint_transfer
+# MAGIC     COALESCE(has_complaint_note, false)
+# MAGIC     OR COALESCE(has_complaint_transfer, false)
 # MAGIC     OR current_pool_id = 'ld_pool_complaint'
-# MAGIC     OR has_open_callback
-# MAGIC     OR is_current_pool_locked
-# MAGIC     OR is_gdpr_pool
+# MAGIC     OR COALESCE(has_open_callback, false)
+# MAGIC     OR COALESCE(is_current_pool_locked, false)
+# MAGIC     OR COALESCE(is_gdpr_pool, false)
 # MAGIC   ) AS is_protected,
 # MAGIC   CAST(NULL AS STRING) AS proposed_pool_id,
 # MAGIC   snapshot_at
@@ -524,7 +524,7 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   CASE
 # MAGIC     WHEN w.lead_tag = 'CALLBACK' THEN COALESCE(w.callback_owner_pool_id, w.current_pool_id)
 # MAGIC     WHEN w.lead_tag = 'LOCKED' THEN w.current_pool_id
-# MAGIC     WHEN w.is_protected AND w.lead_tag <> 'COMPLAINT' THEN w.current_pool_id
+# MAGIC     WHEN COALESCE(w.is_protected, false) AND w.lead_tag <> 'COMPLAINT' THEN w.current_pool_id
 # MAGIC     ELSE COALESCE(r.`poolId`, 'ld_pool_unassigned')
 # MAGIC   END AS proposed_pool_id,
 # MAGIC   w.site_count,
@@ -568,10 +568,9 @@ print("crm_pool_rule", _rules.count())
 # MAGIC %md
 # MAGIC ## Step 4 — Staging write (Databricks → `public.ld_apply_batch`)
 # MAGIC
-# MAGIC Does **not** set `companies.poolId`. After this cell, run `apply_ld_apply_batch.sql` in Supabase.
-# MAGIC Skips Retention until deals exist. Skips sticky (`is_protected`).
-# MAGIC Seed DFV pools first (`seed_dfv_pools.sql`) if `EON_NOW` rows will be in the batch.
-# MAGIC Uses the password cell at the top — do not put a password in this cell.
+# MAGIC Writes `public.ld_apply_batch` only. `companies.poolId` is set by
+# MAGIC `SELECT public.ld_apply_batch_run();` (same SQL the nightly cron calls).
+# MAGIC Null `is_protected` is treated as not sticky. Retention tags stay out until deals exist.
 
 # COMMAND ----------
 
@@ -580,13 +579,14 @@ moves = spark.sql(
     """
     SELECT company_id, proposed_pool_id
     FROM crm_load.new_crm.ld_working
-    WHERE is_protected = false
+    WHERE COALESCE(is_protected, false) = false
       AND proposed_pool_id IS NOT NULL
-      AND current_pool_id IS DISTINCT FROM proposed_pool_id
+      AND COALESCE(current_pool_id, '') <> COALESCE(proposed_pool_id, '')
       AND lead_tag NOT IN ('PAST_RETENTION', 'RETENTION', 'UPSELLING')
     """
 )
 print("rows", moves.count())
+display(moves)
 
 (
     moves.write.format("postgresql")
