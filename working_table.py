@@ -263,9 +263,14 @@ try:
         c_st = _col(cre, "status")
         if c_deal and c_st and d_id and d_co:
             parts.append(
-                cre.where(F.lower(F.col(c_st).cast("string")).rlike(reject_re))
-                .join(deals_s, F.col(c_deal) == F.col(d_id), "inner")
-                .select(F.col(d_co).alias("company_id"))
+                cre.alias("cre")
+                .where(F.lower(F.col(f"cre.{c_st}").cast("string")).rlike(reject_re))
+                .join(
+                    deals_s.alias("dd"),
+                    F.col(f"cre.{c_deal}") == F.col(f"dd.{d_id}"),
+                    "inner",
+                )
+                .select(F.col(f"dd.{d_co}").alias("company_id"))
             )
     except Exception as e:
         print("compliance_review_entries not ready:", str(e)[:200])
