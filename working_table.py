@@ -608,8 +608,8 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC
 # MAGIC Tag → **parent** shared pool via `crm_pool_rule` (snapshot).
 # MAGIC New pool = seed the pool + one rule row. No CASE edit.
-# MAGIC Custom split comes later: it reads that parent, then `crm_pool_split_policy`.
-# MAGIC Sticky still wins: callback / locked stay; complaint uses the rule.
+# MAGIC Custom split comes later. Sticky still wins: callback / locked stay; complaint uses the rule.
+# MAGIC Next: **write the shared parent**, apply, then fair-share to agents.
 
 # COMMAND ----------
 
@@ -684,17 +684,36 @@ print("crm_pool_rule", _rules.count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 4 — Staging write (Databricks → `public.ld_apply_batch`)
+# MAGIC ## Step 4 — Write shared pools first
 # MAGIC
-# MAGIC Writes `public.ld_apply_batch` only. `companies.poolId` is set by
-# MAGIC `SELECT public.ld_apply_batch_run();` (same SQL the nightly cron calls).
-# MAGIC Null `is_protected` is treated as not sticky.
-# MAGIC Retention tags apply when a deal exists or the sourcebridge fallback row exists.
+# MAGIC Same write as today. Companies go to the **shared parent** (E.ON, BG, …).
+# MAGIC Then in Supabase: `SELECT public.ld_apply_batch_run();`
+# MAGIC
+# MAGIC Agent fair-share is **Step 5**, after this apply. Do not skip the apply
+# MAGIC if you want CRM to show the shared bag before agents get a share.
 
 # COMMAND ----------
 
-# DBTITLE 1,write ld_apply_batch
-moves = spark.sql(
+# DBTITLE 1,write shared pools to ld_apply_batch
+def _write_apply_batch(moves_df, label):
+    n = moves_df.count()
+    print(label, n)
+    display(moves_df)
+    (
+        moves_df.write.format("postgresql")
+        .option("host", PG_POOLER_HOST)
+        .option("port", "5432")
+        .option("database", "postgres")
+        .option("dbtable", "public.ld_apply_batch")
+        .option("user", PG_POOLER_USER)
+        .option("password", PG_PASSWORD)
+        .mode("overwrite")
+        .save()
+    )
+    print("batch table written — run SELECT public.ld_apply_batch_run();")
+
+
+shared_moves = spark.sql(
     """
     SELECT company_id, proposed_pool_id
     FROM crm_load.new_crm.ld_working
@@ -703,19 +722,318 @@ moves = spark.sql(
       AND COALESCE(current_pool_id, '') <> COALESCE(proposed_pool_id, '')
     """
 )
-print("rows", moves.count())
-display(moves)
+_write_apply_batch(shared_moves, "shared-pool rows")
 
-(
-    moves.write.format("postgresql")
-    .option("host", PG_POOLER_HOST)
-    .option("port", "5432")
-    .option("database", "postgres")
-    .option("dbtable", "public.ld_apply_batch")
-    .option("user", PG_POOLER_USER)
-    .option("password", PG_PASSWORD)
-    .mode("overwrite")
-    .save()
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 5 — Agent fair-share (Nightly `AllocateCompanies`)
+# MAGIC
+# MAGIC Run **after** Step 4 apply. Reads who is on each shared parent, then
+# MAGIC shares into linked agent pools (`crm_pool_member` + cap).
+# MAGIC
+# MAGIC Sticky is never moved. No members → stop; they stay on the shared bag.
+# MAGIC Custom split is not in this step.
+# MAGIC
+# MAGIC Then Step 6 writes those agent moves and you apply again.
+
+# COMMAND ----------
+
+# DBTITLE 1,snapshot fair-share config
+def _snap_optional(table):
+    try:
+        df = jdbc_table(f"public.{table}")
+        dest = f"crm_load.new_crm.snap_{table}"
+        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dest)
+        print(table, df.count())
+        return True
+    except Exception as exc:
+        print(f"{table} not loaded — fair-share will skip ({exc})")
+        return False
+
+
+has_policy = _snap_optional("crm_pool_split_policy")
+has_member = _snap_optional("crm_pool_member")
+
+# COMMAND ----------
+
+# DBTITLE 1,fair-share proposed_pool_id
+from collections import defaultdict
+
+from pyspark.sql import functions as F
+from pyspark.sql.types import StringType, StructField, StructType
+
+
+def _lc(df, *names):
+    mapping = {c.lower(): c for c in df.columns}
+    for name in names:
+        if name.lower() in mapping:
+            return mapping[name.lower()]
+    return None
+
+
+def _nightly_avg(total, member_caps):
+    """Nightly AvgLeadsForSegment: even split, then shrink for tight caps."""
+    members = len(member_caps)
+    if members == 0 or total <= 0:
+        return 0
+    avg = total // members
+    remain_total = total
+    remain_members = members
+    for cap in member_caps:
+        if cap is not None and cap >= 0 and cap < avg:
+            remain_total -= cap
+            remain_members -= 1
+    if remain_members <= 0:
+        return 0
+    return (remain_total // remain_members) + 1
+
+
+def _room(count, cap):
+    if cap is None or cap < 0:
+        return True
+    return count < cap
+
+
+fair_schema = StructType(
+    [
+        StructField("company_id", StringType(), False),
+        StructField("fair_share_pool_id", StringType(), True),
+        StructField("fair_share_reason", StringType(), True),
+    ]
 )
-print("batch table written")
+empty_fair = spark.createDataFrame([], fair_schema)
+
+if not (has_policy and has_member):
+    empty_fair.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.ld_fair_share"
+    )
+    print("Fair-share skipped — policy/member tables missing. Proposed stays on shared parent.")
+else:
+    pol = spark.table("crm_load.new_crm.snap_crm_pool_split_policy")
+    mem = spark.table("crm_load.new_crm.snap_crm_pool_member")
+    p_id = _lc(pol, "id")
+    p_parent = _lc(pol, "parentPoolId")
+    p_strategy = _lc(pol, "strategy")
+    p_active = _lc(pol, "isActive")
+    m_policy = _lc(mem, "policyId")
+    m_child = _lc(mem, "childPoolId")
+    m_max = _lc(mem, "maxRecords")
+    m_sort = _lc(mem, "sortOrder")
+    m_active = _lc(mem, "isActive")
+
+    policies = [
+        r.asDict()
+        for r in pol.select(
+            F.col(p_id).alias("policy_id"),
+            F.col(p_parent).alias("parent_pool_id"),
+            F.col(p_strategy).alias("strategy"),
+            F.col(p_active).alias("is_active"),
+        ).collect()
+    ]
+    members = [
+        r.asDict()
+        for r in mem.select(
+            F.col(m_policy).alias("policy_id"),
+            F.col(m_child).alias("child_pool_id"),
+            F.col(m_max).alias("max_records") if m_max else F.lit(None).cast("int").alias("max_records"),
+            (F.col(m_sort) if m_sort else F.lit(100)).alias("sort_order"),
+            F.col(m_active).alias("is_active"),
+        ).collect()
+    ]
+
+    policy_by_id = {p["policy_id"]: p for p in policies}
+    members_by_parent = defaultdict(list)
+    for m in members:
+        if not m.get("is_active"):
+            continue
+        pol = policy_by_id.get(m["policy_id"])
+        if not pol:
+            continue
+        if not pol.get("is_active"):
+            continue
+        if str(pol.get("strategy") or "").upper() != "FAIR_SHARE":
+            continue
+        members_by_parent[pol["parent_pool_id"]].append(m)
+
+    members_by_parent = {
+        parent: sorted(
+            rows,
+            key=lambda r: (r.get("sort_order") or 100, r["child_pool_id"] or ""),
+        )
+        for parent, rows in members_by_parent.items()
+        if rows
+    }
+
+    print("active FAIR_SHARE parents:", len(members_by_parent))
+    for parent, rows in members_by_parent.items():
+        print(" ", parent, "→", len(rows), "agents", [r["child_pool_id"] for r in rows])
+
+    if not members_by_parent:
+        empty_fair.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+            "crm_load.new_crm.ld_fair_share"
+        )
+        print("No members linked — companies stay on shared parents.")
+    else:
+        working = spark.table("crm_load.new_crm.ld_working").collect()
+        by_parent = defaultdict(list)
+        passthrough = []
+        for row in working:
+            d = row.asDict()
+            parent = d.get("proposed_pool_id")
+            if d.get("is_protected") or parent not in members_by_parent:
+                passthrough.append(
+                    (
+                        d["company_id"],
+                        d.get("proposed_pool_id"),
+                        "sticky" if d.get("is_protected") else "no_members",
+                    )
+                )
+            else:
+                by_parent[parent].append(d)
+
+        updates = list(passthrough)
+        for parent, companies in by_parent.items():
+            roster = members_by_parent[parent]
+            cap_of = {
+                r["child_pool_id"]: (
+                    None
+                    if r.get("max_records") is None
+                    else int(r["max_records"])
+                )
+                for r in roster
+            }
+            member_ids = [r["child_pool_id"] for r in roster]
+            member_set = set(member_ids)
+
+            assigned = {}
+            reason = {}
+            for c in companies:
+                cid = c["company_id"]
+                current = c.get("current_pool_id")
+                if current in member_set:
+                    assigned[cid] = current
+                    reason[cid] = "keep_child"
+                else:
+                    assigned[cid] = parent
+                    reason[cid] = "on_parent" if current == parent else "reclaim_wrong"
+
+            def held(child):
+                return [
+                    c["company_id"]
+                    for c in companies
+                    if assigned[c["company_id"]] == child
+                ]
+
+            # Cap reclaim (Nightly DeAllocateExcess vs max_records)
+            for child in member_ids:
+                cap = cap_of[child]
+                ids = sorted(held(child))
+                if cap is not None and cap >= 0 and len(ids) > cap:
+                    for cid in ids[cap:]:
+                        assigned[cid] = parent
+                        reason[cid] = "reclaim_over_max"
+
+            # Average reclaim (Nightly DeAllocateExcess vs avg)
+            total = len(companies)
+            avg = _nightly_avg(total, [cap_of[ch] for ch in member_ids])
+            if avg > 0:
+                for child in member_ids:
+                    cap = cap_of[child]
+                    limit = avg
+                    if cap is not None and cap >= 0:
+                        limit = min(cap, avg)
+                    ids = sorted(held(child))
+                    if len(ids) > limit:
+                        for cid in ids[limit:]:
+                            assigned[cid] = parent
+                            reason[cid] = "reclaim_over_avg"
+
+            # Fill lowest (Nightly AllocateSegmentCompanies)
+            free = sorted(
+                c["company_id"]
+                for c in companies
+                if assigned[c["company_id"]] == parent
+            )
+            counts = {child: len(held(child)) for child in member_ids}
+            current_min = min(counts.values()) if counts else 0
+            while free:
+                moved = False
+                for child in member_ids:
+                    if not free:
+                        break
+                    if _room(counts[child], cap_of[child]) and counts[child] <= current_min:
+                        cid = free.pop(0)
+                        assigned[cid] = child
+                        reason[cid] = "fair_share"
+                        counts[child] += 1
+                        moved = True
+                if not moved:
+                    current_min += 1
+                    if all(not _room(counts[ch], cap_of[ch]) for ch in member_ids):
+                        break
+
+            for c in companies:
+                cid = c["company_id"]
+                updates.append((cid, assigned[cid], reason[cid]))
+
+        spark.createDataFrame(updates, fair_schema).write.mode("overwrite").option(
+            "overwriteSchema", "true"
+        ).saveAsTable("crm_load.new_crm.ld_fair_share")
+        print("fair-share rows", len(updates))
+
+# proposed_pool_id on ld_working stays the shared parent (Step 3 / Step 4).
+spark.sql(
+    """
+    SELECT
+      COALESCE(f.fair_share_reason, 'no_fair_share_row') AS reason,
+      COUNT(*) AS companies
+    FROM crm_load.new_crm.ld_working w
+    LEFT JOIN crm_load.new_crm.ld_fair_share f ON w.company_id = f.company_id
+    GROUP BY 1
+    ORDER BY companies DESC
+    """
+).show(50, False)
+
+spark.sql(
+    """
+    SELECT
+      w.proposed_pool_id AS shared_parent,
+      f.fair_share_pool_id AS agent_pool,
+      f.fair_share_reason,
+      COUNT(*) AS companies
+    FROM crm_load.new_crm.ld_working w
+    LEFT JOIN crm_load.new_crm.ld_fair_share f ON w.company_id = f.company_id
+    GROUP BY 1, 2, 3
+    ORDER BY companies DESC
+    """
+).show(50, False)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 6 — Write agent fair-share
+# MAGIC
+# MAGIC Second batch: parent → agent pool. Run only after Step 4 apply and Step 5.
+# MAGIC Then `SELECT public.ld_apply_batch_run();` again.
+# MAGIC Empty members → 0 rows.
+
+# COMMAND ----------
+
+# DBTITLE 1,write agent pools to ld_apply_batch
+agent_moves = spark.sql(
+    """
+    SELECT w.company_id, f.fair_share_pool_id AS proposed_pool_id
+    FROM crm_load.new_crm.ld_working w
+    JOIN crm_load.new_crm.ld_fair_share f
+      ON w.company_id = f.company_id
+    WHERE COALESCE(w.is_protected, false) = false
+      AND f.fair_share_pool_id IS NOT NULL
+      AND f.fair_share_reason IN (
+        'fair_share', 'reclaim_wrong', 'reclaim_over_max', 'reclaim_over_avg'
+      )
+      AND COALESCE(w.current_pool_id, '') <> COALESCE(f.fair_share_pool_id, '')
+    """
+)
+_write_apply_batch(agent_moves, "agent-pool rows")
 
