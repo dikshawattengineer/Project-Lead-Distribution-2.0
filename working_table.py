@@ -67,6 +67,20 @@ for table in [
     df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dest)
     print(table, df.count())
 
+try:
+    sale = jdbc_table("public.crm_company_load_sale")
+    sale.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_crm_company_load_sale"
+    )
+    print("crm_company_load_sale", sale.count())
+except Exception as e:
+    spark.createDataFrame(
+        [], "companyId string, lastDealEndDate date, hasPastSale boolean"
+    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_crm_company_load_sale"
+    )
+    print("crm_company_load_sale skip", str(e)[:160])
+
 # Stamp DFV on the winning-contract type column (Nightly 1/2/4 or deemed/flexible/variable).
 contracts = spark.table("crm_load.new_crm.snap_contracts")
 col_by_lower = {c.lower(): c for c in contracts.columns}
@@ -411,6 +425,13 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC     last_deal_days_left,
 # MAGIC     last_deal_days_since
 # MAGIC   FROM crm_load.new_crm.ld_last_deals
+# MAGIC ),
+# MAGIC load_sale AS (
+# MAGIC   SELECT
+# MAGIC     `companyId` AS company_id,
+# MAGIC     `lastDealEndDate` AS last_deal_end_date,
+# MAGIC     COALESCE(`hasPastSale`, true) AS has_past_sale
+# MAGIC   FROM crm_load.new_crm.snap_crm_company_load_sale
 # MAGIC )
 # MAGIC SELECT
 # MAGIC   co.id                                            AS company_id,
@@ -425,10 +446,20 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   COALESCE(w.is_dfv, false)                        AS is_win_dfv,
 # MAGIC   w.raw_days_left,
 # MAGIC   w.days_left,
-# MAGIC   ld.last_deal_raw_days_left,
-# MAGIC   ld.last_deal_days_left,
+# MAGIC   COALESCE(
+# MAGIC     ld.last_deal_raw_days_left,
+# MAGIC     DATEDIFF(ls.last_deal_end_date, CURRENT_DATE)
+# MAGIC   ) AS last_deal_raw_days_left,
+# MAGIC   COALESCE(
+# MAGIC     ld.last_deal_days_left,
+# MAGIC     COALESCE(DATEDIFF(ls.last_deal_end_date, CURRENT_DATE), 0)
+# MAGIC   ) AS last_deal_days_left,
 # MAGIC   ld.last_deal_days_since,
-# MAGIC   CASE WHEN d.company_id IS NOT NULL THEN true ELSE false END AS has_any_past_deal,
+# MAGIC   CASE
+# MAGIC     WHEN d.company_id IS NOT NULL THEN true
+# MAGIC     WHEN COALESCE(ls.has_past_sale, false) THEN true
+# MAGIC     ELSE false
+# MAGIC   END AS has_any_past_deal,
 # MAGIC   CASE WHEN cb.company_id IS NOT NULL THEN true ELSE false END AS has_open_callback,
 # MAGIC   cb.callback_owner_pool_id,
 # MAGIC   COALESCE(pl.`isLocked`, false)                   AS is_current_pool_locked,
@@ -449,6 +480,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC LEFT JOIN callbacks cb ON co.id = cb.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_deal_companies d ON co.id = d.company_id
 # MAGIC LEFT JOIN last_deals ld ON co.id = ld.company_id
+# MAGIC LEFT JOIN load_sale ls ON co.id = ls.company_id
 # MAGIC LEFT JOIN complaint_notes cn ON co.id = cn.company_id
 # MAGIC LEFT JOIN complaint_xfer xf ON co.id = xf.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_rejected_deal_companies rd ON co.id = rd.company_id
@@ -656,7 +688,8 @@ print("crm_pool_rule", _rules.count())
 # MAGIC
 # MAGIC Writes `public.ld_apply_batch` only. `companies.poolId` is set by
 # MAGIC `SELECT public.ld_apply_batch_run();` (same SQL the nightly cron calls).
-# MAGIC Null `is_protected` is treated as not sticky. Retention tags stay out until deals exist.
+# MAGIC Null `is_protected` is treated as not sticky.
+# MAGIC Retention tags apply when a deal exists or the sourcebridge fallback row exists.
 
 # COMMAND ----------
 
@@ -668,7 +701,6 @@ moves = spark.sql(
     WHERE COALESCE(is_protected, false) = false
       AND proposed_pool_id IS NOT NULL
       AND COALESCE(current_pool_id, '') <> COALESCE(proposed_pool_id, '')
-      AND lead_tag NOT IN ('PAST_RETENTION', 'RETENTION', 'UPSELLING')
     """
 )
 print("rows", moves.count())
