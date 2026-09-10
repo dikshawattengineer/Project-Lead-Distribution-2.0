@@ -436,7 +436,6 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC SELECT
 # MAGIC   co.id                                            AS company_id,
 # MAGIC   co.`poolId`                                      AS current_pool_id,
-# MAGIC   co.`profileId`                                   AS current_profile_id,
 # MAGIC   CAST(NULL AS STRING)                             AS lead_tag,
 # MAGIC   COALESCE(s.site_count, 0)                        AS site_count,
 # MAGIC   w.provider_id                                    AS win_provider_id,
@@ -528,7 +527,6 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC SELECT
 # MAGIC   company_id,
 # MAGIC   current_pool_id,
-# MAGIC   current_profile_id,
 # MAGIC   CASE
 # MAGIC     WHEN COALESCE(has_complaint_note, false)
 # MAGIC       OR COALESCE(has_complaint_transfer, false)
@@ -611,8 +609,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC Tag → **parent** shared pool via `crm_pool_rule` (snapshot).
 # MAGIC New pool = seed the pool + one rule row. No CASE edit.
 # MAGIC Custom split comes later. Sticky still wins: callback / locked stay; complaint uses the rule.
-# MAGIC Next: **write the shared parent**, apply, then fair-share **profileId**
-# MAGIC (Retention / Past Retention only). Company stays on that shared pool.
+# MAGIC Next: write the shared parent, then apply. No agent / profile share.
 
 # COMMAND ----------
 
@@ -639,7 +636,6 @@ print("crm_pool_rule", _rules.count())
 # MAGIC SELECT
 # MAGIC   w.company_id,
 # MAGIC   w.current_pool_id,
-# MAGIC   w.current_profile_id,
 # MAGIC   w.lead_tag,
 # MAGIC   CASE
 # MAGIC     WHEN w.lead_tag = 'CALLBACK' THEN COALESCE(w.callback_owner_pool_id, w.current_pool_id)
@@ -688,14 +684,11 @@ print("crm_pool_rule", _rules.count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 4 — Write shared pools first
+# MAGIC ## Step 4 — Write shared pools
 # MAGIC
-# MAGIC Same write as today. Companies go to the **shared parent** (E.ON, BG, …).
+# MAGIC Companies go to the **shared parent** (Retentions, Past Retentions,
+# MAGIC Upselling, E.ON, BG, …). Pipeline stops here.
 # MAGIC Then in Supabase: `SELECT public.ld_apply_batch_run();`
-# MAGIC
-# MAGIC Then `SELECT public.ld_apply_batch_run();` so companies sit on
-# MAGIC Retentions / Past Retentions again (not ld_agent_*).
-# MAGIC Step 5–6 stamp **profileId** only.
 
 # COMMAND ----------
 
@@ -728,336 +721,3 @@ shared_moves = spark.sql(
     """
 )
 _write_apply_batch(shared_moves, "shared-pool rows")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Step 5 — Fair-share profiles (Retention only)
-# MAGIC
-# MAGIC Run **after** Step 4 apply. Company stays on Retentions / Past Retentions.
-# MAGIC `crm_pool_member.profileId` is who may get a share.
-# MAGIC Sticky is never moved. No members → `profileId` stays empty.
-# MAGIC Supplier bags are not shared in this step.
-# MAGIC
-# MAGIC Then Step 6 writes `ld_apply_profile_batch`.
-
-# COMMAND ----------
-
-# DBTITLE 1,snapshot fair-share config
-def _snap_optional(table):
-    try:
-        df = jdbc_table(f"public.{table}")
-        dest = f"crm_load.new_crm.snap_{table}"
-        df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dest)
-        print(table, df.count())
-        return True
-    except Exception as exc:
-        print(f"{table} not loaded — fair-share will skip ({exc})")
-        return False
-
-
-has_policy = _snap_optional("crm_pool_split_policy")
-has_member = _snap_optional("crm_pool_member")
-
-# COMMAND ----------
-
-# DBTITLE 1,fair-share profileId
-from collections import defaultdict
-
-from pyspark.sql import functions as F
-from pyspark.sql.types import StringType, StructField, StructType
-
-FAIR_SHARE_PARENTS = {
-    "ld_pool_retention",
-    "ld_pool_retention_ooc",
-}
-
-
-def _lc(df, *names):
-    mapping = {c.lower(): c for c in df.columns}
-    for name in names:
-        if name.lower() in mapping:
-            return mapping[name.lower()]
-    return None
-
-
-def _nightly_avg(total, member_caps):
-    """Nightly AvgLeadsForSegment: even split, then shrink for tight caps."""
-    members = len(member_caps)
-    if members == 0 or total <= 0:
-        return 0
-    avg = total // members
-    remain_total = total
-    remain_members = members
-    for cap in member_caps:
-        if cap is not None and cap >= 0 and cap < avg:
-            remain_total -= cap
-            remain_members -= 1
-    if remain_members <= 0:
-        return 0
-    return (remain_total // remain_members) + 1
-
-
-def _room(count, cap):
-    if cap is None or cap < 0:
-        return True
-    return count < cap
-
-
-fair_schema = StructType(
-    [
-        StructField("company_id", StringType(), False),
-        StructField("fair_share_profile_id", StringType(), True),
-        StructField("fair_share_reason", StringType(), True),
-    ]
-)
-empty_fair = spark.createDataFrame([], fair_schema)
-
-if not (has_policy and has_member):
-    empty_fair.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.ld_fair_share"
-    )
-    print("Fair-share skipped — policy/member tables missing.")
-else:
-    pol = spark.table("crm_load.new_crm.snap_crm_pool_split_policy")
-    mem = spark.table("crm_load.new_crm.snap_crm_pool_member")
-    p_id = _lc(pol, "id")
-    p_parent = _lc(pol, "parentPoolId")
-    p_strategy = _lc(pol, "strategy")
-    p_active = _lc(pol, "isActive")
-    m_policy = _lc(mem, "policyId")
-    m_profile = _lc(mem, "profileId")
-    m_max = _lc(mem, "maxRecords")
-    m_sort = _lc(mem, "sortOrder")
-    m_active = _lc(mem, "isActive")
-
-    if not m_profile:
-        empty_fair.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-            "crm_load.new_crm.ld_fair_share"
-        )
-        print("Fair-share skipped — run 19_member_profile_id.sql (no profileId column).")
-    else:
-        policies = [
-            r.asDict()
-            for r in pol.select(
-                F.col(p_id).alias("policy_id"),
-                F.col(p_parent).alias("parent_pool_id"),
-                F.col(p_strategy).alias("strategy"),
-                F.col(p_active).alias("is_active"),
-            ).collect()
-        ]
-        members = [
-            r.asDict()
-            for r in mem.select(
-                F.col(m_policy).alias("policy_id"),
-                F.col(m_profile).alias("profile_id"),
-                F.col(m_max).alias("max_records") if m_max else F.lit(None).cast("int").alias("max_records"),
-                (F.col(m_sort) if m_sort else F.lit(100)).alias("sort_order"),
-                F.col(m_active).alias("is_active"),
-            ).collect()
-        ]
-
-        policy_by_id = {p["policy_id"]: p for p in policies}
-        members_by_parent = defaultdict(list)
-        for m in members:
-            if not m.get("is_active") or not m.get("profile_id"):
-                continue
-            pol_row = policy_by_id.get(m["policy_id"])
-            if not pol_row or not pol_row.get("is_active"):
-                continue
-            if str(pol_row.get("strategy") or "").upper() != "FAIR_SHARE":
-                continue
-            parent = pol_row["parent_pool_id"]
-            if parent not in FAIR_SHARE_PARENTS:
-                continue
-            members_by_parent[parent].append(m)
-
-        members_by_parent = {
-            parent: sorted(
-                rows,
-                key=lambda r: (r.get("sort_order") or 100, r["profile_id"] or ""),
-            )
-            for parent, rows in members_by_parent.items()
-            if rows
-        }
-
-        print("active Retention FAIR_SHARE parents:", len(members_by_parent))
-        for parent, rows in members_by_parent.items():
-            print(" ", parent, "→", len(rows), "profiles", [r["profile_id"] for r in rows])
-
-        if not members_by_parent:
-            empty_fair.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-                "crm_load.new_crm.ld_fair_share"
-            )
-            print("No Retention members with profileId — stay on shared bag, no Agent.")
-        else:
-            working = spark.table("crm_load.new_crm.ld_working").collect()
-            by_parent = defaultdict(list)
-            passthrough = []
-            for row in working:
-                d = row.asDict()
-                parent = d.get("proposed_pool_id")
-                if d.get("is_protected") or parent not in members_by_parent:
-                    passthrough.append(
-                        (
-                            d["company_id"],
-                            d.get("current_profile_id"),
-                            "sticky" if d.get("is_protected") else "no_members",
-                        )
-                    )
-                else:
-                    by_parent[parent].append(d)
-
-            updates = list(passthrough)
-            for parent, companies in by_parent.items():
-                roster = members_by_parent[parent]
-                cap_of = {
-                    r["profile_id"]: (
-                        None
-                        if r.get("max_records") is None
-                        else int(r["max_records"])
-                    )
-                    for r in roster
-                }
-                member_ids = [r["profile_id"] for r in roster]
-                member_set = set(member_ids)
-
-                assigned = {}
-                reason = {}
-                for c in companies:
-                    cid = c["company_id"]
-                    current = c.get("current_profile_id")
-                    if current in member_set:
-                        assigned[cid] = current
-                        reason[cid] = "keep_profile"
-                    else:
-                        assigned[cid] = None
-                        reason[cid] = "on_parent" if not current else "reclaim_wrong"
-
-                def held(profile):
-                    return [
-                        c["company_id"]
-                        for c in companies
-                        if assigned[c["company_id"]] == profile
-                    ]
-
-                for profile in member_ids:
-                    cap = cap_of[profile]
-                    ids = sorted(held(profile))
-                    if cap is not None and cap >= 0 and len(ids) > cap:
-                        for cid in ids[cap:]:
-                            assigned[cid] = None
-                            reason[cid] = "reclaim_over_max"
-
-                total = len(companies)
-                avg = _nightly_avg(total, [cap_of[p] for p in member_ids])
-                if avg > 0:
-                    for profile in member_ids:
-                        cap = cap_of[profile]
-                        limit = avg
-                        if cap is not None and cap >= 0:
-                            limit = min(cap, avg)
-                        ids = sorted(held(profile))
-                        if len(ids) > limit:
-                            for cid in ids[limit:]:
-                                assigned[cid] = None
-                                reason[cid] = "reclaim_over_avg"
-
-                free = sorted(
-                    c["company_id"]
-                    for c in companies
-                    if assigned[c["company_id"]] is None
-                )
-                counts = {profile: len(held(profile)) for profile in member_ids}
-                current_min = min(counts.values()) if counts else 0
-                while free:
-                    moved = False
-                    for profile in member_ids:
-                        if not free:
-                            break
-                        if _room(counts[profile], cap_of[profile]) and counts[profile] <= current_min:
-                            cid = free.pop(0)
-                            assigned[cid] = profile
-                            reason[cid] = "fair_share"
-                            counts[profile] += 1
-                            moved = True
-                    if not moved:
-                        current_min += 1
-                        if all(not _room(counts[p], cap_of[p]) for p in member_ids):
-                            break
-
-                for c in companies:
-                    cid = c["company_id"]
-                    updates.append((cid, assigned[cid], reason[cid]))
-
-            spark.createDataFrame(updates, fair_schema).write.mode("overwrite").option(
-                "overwriteSchema", "true"
-            ).saveAsTable("crm_load.new_crm.ld_fair_share")
-            print("fair-share rows", len(updates))
-
-spark.sql(
-    """
-    SELECT
-      COALESCE(f.fair_share_reason, 'no_fair_share_row') AS reason,
-      COUNT(*) AS companies
-    FROM crm_load.new_crm.ld_working w
-    LEFT JOIN crm_load.new_crm.ld_fair_share f ON w.company_id = f.company_id
-    GROUP BY 1
-    ORDER BY companies DESC
-    """
-).show(50, False)
-
-spark.sql(
-    """
-    SELECT
-      w.proposed_pool_id AS shared_parent,
-      f.fair_share_profile_id,
-      f.fair_share_reason,
-      COUNT(*) AS companies
-    FROM crm_load.new_crm.ld_working w
-    LEFT JOIN crm_load.new_crm.ld_fair_share f ON w.company_id = f.company_id
-    GROUP BY 1, 2, 3
-    ORDER BY companies DESC
-    """
-).show(50, False)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Step 6 — Write profileId
-# MAGIC
-# MAGIC Does **not** change `poolId`. After this:
-# MAGIC `SELECT public.ld_apply_profile_run();`
-
-# COMMAND ----------
-
-# DBTITLE 1,write profiles to ld_apply_profile_batch
-profile_moves = spark.sql(
-    """
-    SELECT w.company_id, f.fair_share_profile_id AS proposed_profile_id
-    FROM crm_load.new_crm.ld_working w
-    JOIN crm_load.new_crm.ld_fair_share f
-      ON w.company_id = f.company_id
-    WHERE COALESCE(w.is_protected, false) = false
-      AND f.fair_share_reason IN (
-        'fair_share', 'reclaim_wrong', 'reclaim_over_max', 'reclaim_over_avg'
-      )
-      AND COALESCE(w.current_profile_id, '') <> COALESCE(f.fair_share_profile_id, '')
-    """
-)
-n = profile_moves.count()
-print("profile rows", n)
-display(profile_moves)
-(
-    profile_moves.write.format("postgresql")
-    .option("host", PG_POOLER_HOST)
-    .option("port", "5432")
-    .option("database", "postgres")
-    .option("dbtable", "public.ld_apply_profile_batch")
-    .option("user", PG_POOLER_USER)
-    .option("password", PG_PASSWORD)
-    .mode("overwrite")
-    .save()
-)
-print("profile batch written — run SELECT public.ld_apply_profile_run();")
-
