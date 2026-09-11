@@ -9,7 +9,8 @@
 # MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): E.ON deemed/flexible/variable
 # MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
 # MAGIC
-# MAGIC **Does not write `companies.poolId`.**
+# MAGIC **Does not write `companies.poolId` until Step 4.**
+# MAGIC **Stops at shared pools. No profileId / agent fair-share in this notebook.**
 
 # COMMAND ----------
 
@@ -42,6 +43,26 @@ def jdbc_table(pg_table: str):
     )
 
 print("JDBC host =", JDBC_HOST)
+
+# COMMAND ----------
+
+# DBTITLE 1,Janitor (leavers) — run before snapshot
+# Nightly Janitor first: pull leavers off books. Does not wipe every pool.
+# Requires 24_janitor.sql in Supabase. TPS / blacklist later.
+try:
+    _janitor = (
+        spark.read.format("jdbc")
+        .option("url", JDBC_URL)
+        .option("query", "SELECT public.ld_janitor_run() AS companies_cleared")
+        .option("user", JDBC_USER)
+        .option("password", PG_PASSWORD)
+        .option("driver", "org.postgresql.Driver")
+        .option("sslmode", "require")
+        .load()
+    )
+    print("janitor companies_cleared", _janitor.collect()[0]["companies_cleared"])
+except Exception as exc:
+    print("janitor skip — run 24_janitor.sql first:", str(exc)[:200])
 
 # COMMAND ----------
 
@@ -737,3 +758,13 @@ shared_moves = spark.sql(
     """
 )
 _write_apply_batch(shared_moves, "shared-pool rows")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Cron (after this notebook)
+# MAGIC
+# MAGIC 1. Databricks Job: run **Password → Janitor → Snapshot → tag → propose → write shared**
+# MAGIC 2. Then Supabase: `SELECT public.ld_apply_batch_run();` (`25_cron.sql`)
+# MAGIC
+# MAGIC No profile / agent fair-share. Parent vs private pool waits for the boss schema.

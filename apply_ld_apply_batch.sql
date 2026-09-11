@@ -46,39 +46,5 @@ BEGIN
 END;
 $$;
 
--- Profile fair-share (Retention now; suppliers later). Does not change poolId.
-CREATE TABLE IF NOT EXISTS public.ld_apply_profile_batch (
-  company_id text NOT NULL,
-  proposed_profile_id text
-);
-
-CREATE OR REPLACE FUNCTION public.ld_apply_profile_run()
-RETURNS integer
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  n integer := 0;
-BEGIN
-  IF to_regclass('public.ld_apply_profile_batch') IS NULL THEN
-    RETURN 0;
-  END IF;
-
-  WITH changed AS (
-    UPDATE public.companies c
-    SET "profileId" = b.proposed_profile_id,
-        "updatedAt" = NOW()
-    FROM public.ld_apply_profile_batch b
-    WHERE c.id = b.company_id
-      AND c."profileId" IS DISTINCT FROM b.proposed_profile_id
-    RETURNING c.id
-  )
-  SELECT COUNT(*) INTO n FROM changed;
-
-  RETURN n;
-END;
-$$;
-
--- Nightly / SQL editor / pg_cron:
---   SELECT public.ld_apply_batch_run();      -- shared poolId
---   SELECT public.ld_apply_profile_run();    -- profileId only
+-- Nightly / SQL editor / pg_cron after Databricks Step 4:
 SELECT public.ld_apply_batch_run() AS companies_moved;
