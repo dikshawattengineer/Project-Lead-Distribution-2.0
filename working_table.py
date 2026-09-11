@@ -3,7 +3,8 @@
 # MAGIC # Step 1 — Working table
 # MAGIC
 # MAGIC Snapshot CRM tables, then one SQL builds `ld_working`.
-# MAGIC Tag order: **sticky first** (Nightly), then Retention, then supplier.
+# MAGIC Tag order: **sticky first**, then Customer Care (7–60 days since sale),
+# MAGIC then Retention clock, then Corporate (21–200), then supplier.
 # MAGIC
 # MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): E.ON deemed/flexible/variable
 # MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
@@ -534,12 +535,27 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       THEN 'COMPLAINT'
 # MAGIC     WHEN COALESCE(has_open_callback, false) THEN 'CALLBACK'
 # MAGIC     WHEN COALESCE(is_current_pool_locked, false) OR COALESCE(is_gdpr_pool, false) THEN 'LOCKED'
+# MAGIC     WHEN has_any_past_deal
+# MAGIC       AND NOT COALESCE(has_rejected_deal, false)
+# MAGIC       AND last_deal_days_since IS NOT NULL
+# MAGIC       AND last_deal_days_since >= 7
+# MAGIC       AND last_deal_days_since <= 60
+# MAGIC       THEN 'CUSTOMER_CARE'
 # MAGIC     WHEN has_any_past_deal AND NOT COALESCE(has_rejected_deal, false) THEN
 # MAGIC       CASE
 # MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN 'PAST_RETENTION'
 # MAGIC         WHEN last_deal_days_left <= 540 THEN 'RETENTION'
 # MAGIC         ELSE 'UPSELLING'
 # MAGIC       END
+# MAGIC     WHEN site_count > 200 THEN 'UNASSIGNED'
+# MAGIC     WHEN site_count >= 21 AND site_count <= 200
+# MAGIC       AND (
+# MAGIC         COALESCE(is_win_dfv, false)
+# MAGIC         OR raw_days_left IS NULL
+# MAGIC         OR days_left <= 365
+# MAGIC       )
+# MAGIC       THEN 'CORPORATE'
+# MAGIC     WHEN site_count >= 21 THEN 'UNASSIGNED'
 # MAGIC     WHEN COALESCE(is_exclusively_deenergised, false) THEN 'UNASSIGNED'
 # MAGIC     WHEN win_family IS NULL THEN 'UNASSIGNED'
 # MAGIC     WHEN is_win_dfv OR raw_days_left IS NULL OR days_left <= 0 THEN
