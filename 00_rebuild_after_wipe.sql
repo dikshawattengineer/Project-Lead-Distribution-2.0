@@ -10,7 +10,7 @@
 --      parent/private pool). Not used while we stop at shared apply.
 --   5) apply_ld_apply_batch.sql         ld_apply_batch + ld_apply_batch_run()
 --   6) 24_janitor.sql                   ld_janitor_run()
---   7) 25_cron.sql                      optional pg_cron on apply
+--   7) 25_cron.sql                      docs only — cron is the Databricks Job
 --   8) 16 + last-sale fill              ONLY if sourcebridge exists (migrate)
 --
 -- Do NOT run 18/19/21 (profile/agent share) until boss private-pool schema lands.

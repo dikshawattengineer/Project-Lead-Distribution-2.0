@@ -42,24 +42,28 @@ def jdbc_table(pg_table: str):
         .load()
     )
 
-print("JDBC host =", JDBC_HOST)
 
-# COMMAND ----------
-
-# DBTITLE 1,Janitor (leavers) — run before snapshot
-# Nightly Janitor first: pull leavers off books. Does not wipe every pool.
-# Requires 24_janitor.sql in Supabase. TPS / blacklist later.
-try:
-    _janitor = (
+def pg_query(sql: str):
+    return (
         spark.read.format("jdbc")
         .option("url", JDBC_URL)
-        .option("query", "SELECT public.ld_janitor_run() AS companies_cleared")
+        .option("query", sql)
         .option("user", JDBC_USER)
         .option("password", PG_PASSWORD)
         .option("driver", "org.postgresql.Driver")
         .option("sslmode", "require")
         .load()
     )
+
+print("JDBC host =", JDBC_HOST)
+
+# COMMAND ----------
+
+# DBTITLE 1,Janitor (leavers) — run before snapshot
+# Nightly Janitor first: pull leavers off books. Does not wipe every pool.
+# Requires 24_janitor.sql once in Supabase (creates the function). TPS / blacklist later.
+try:
+    _janitor = pg_query("SELECT public.ld_janitor_run() AS companies_cleared")
     print("janitor companies_cleared", _janitor.collect()[0]["companies_cleared"])
 except Exception as exc:
     print("janitor skip — run 24_janitor.sql first:", str(exc)[:200])
@@ -721,15 +725,15 @@ print("crm_pool_rule", _rules.count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 4 — Write shared pools
+# MAGIC ## Step 4 — Write shared pools, then apply
 # MAGIC
 # MAGIC Companies go to the **shared parent** (Retentions, Past Retentions,
-# MAGIC Upselling, E.ON, BG, …). Pipeline stops here.
-# MAGIC Then in Supabase: `SELECT public.ld_apply_batch_run();`
+# MAGIC Upselling, E.ON, BG, …). This cell writes `ld_apply_batch` **and**
+# MAGIC runs `ld_apply_batch_run()` here — no extra trip to Supabase.
 
 # COMMAND ----------
 
-# DBTITLE 1,write shared pools to ld_apply_batch
+# DBTITLE 1,write shared pools then apply in CRM
 def _write_apply_batch(moves_df, label):
     n = moves_df.count()
     print(label, n)
@@ -745,7 +749,7 @@ def _write_apply_batch(moves_df, label):
         .mode("overwrite")
         .save()
     )
-    print("batch table written — run SELECT public.ld_apply_batch_run();")
+    print("batch table written")
 
 
 shared_moves = spark.sql(
@@ -759,12 +763,17 @@ shared_moves = spark.sql(
 )
 _write_apply_batch(shared_moves, "shared-pool rows")
 
+_applied = pg_query("SELECT public.ld_apply_batch_run() AS companies_moved")
+print("apply companies_moved", _applied.collect()[0]["companies_moved"])
+
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Cron (after this notebook)
+# MAGIC ## Cron = this notebook
 # MAGIC
-# MAGIC 1. Databricks Job: run **Password → Janitor → Snapshot → tag → propose → write shared**
-# MAGIC 2. Then Supabase: `SELECT public.ld_apply_batch_run();` (`25_cron.sql`)
+# MAGIC Databricks Job on this notebook (top to bottom):
+# MAGIC **Password → Janitor → Snapshot → tag → write batch → apply.**
+# MAGIC That is the nightly cron. Do **not** also schedule `25_cron.sql` in Supabase
+# MAGIC or apply runs twice.
 # MAGIC
 # MAGIC No profile / agent fair-share. Parent vs private pool waits for the boss schema.

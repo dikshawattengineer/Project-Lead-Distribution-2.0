@@ -46,5 +46,6 @@ BEGIN
 END;
 $$;
 
--- Nightly / SQL editor / pg_cron after Databricks Step 4:
-SELECT public.ld_apply_batch_run() AS companies_moved;
+-- Databricks Step 4 calls this after it writes ld_apply_batch.
+-- Manual check in SQL editor:
+-- SELECT public.ld_apply_batch_run() AS companies_moved;
