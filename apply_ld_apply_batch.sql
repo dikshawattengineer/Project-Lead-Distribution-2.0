@@ -1,6 +1,7 @@
 -- Cron-safe apply. Same SQL every night after Databricks writes public.ld_apply_batch.
 -- Empty batch = 0 updates (not an error). Re-runs only move companies whose pool actually changed.
--- Writes STANDARD shared pools only. Does not set profileId or PRIVATE agent pools.
+-- Writes STANDARD parents, or PRIVATE children that are active in pool_links.
+-- Does not set profileId.
 
 CREATE TABLE IF NOT EXISTS public.ld_apply_batch (
   company_id text NOT NULL,
@@ -26,7 +27,19 @@ BEGIN
     JOIN public.pools p ON p.id = b.proposed_pool_id
     WHERE b.proposed_pool_id IS NOT NULL
       AND c."poolId" IS DISTINCT FROM b.proposed_pool_id
-      AND p.type = 'STANDARD'
+      AND (
+        p.type = 'STANDARD'
+        OR (
+          p.type = 'PRIVATE'
+          AND EXISTS (
+            SELECT 1
+            FROM public.pool_links l
+            WHERE l."childPoolId" = b.proposed_pool_id
+              AND l."isActive" = true
+              AND l."childType" = 'PRIVATE'
+          )
+        )
+      )
   ),
   closed AS (
     UPDATE public.company_pool_placements pl
@@ -67,9 +80,11 @@ BEGIN
       moved.proposed_pool_id,
       'AUTO_ASSIGN',
       actor,
-      'lead_distribution_shared',
+      CASE WHEN p.type = 'PRIVATE' THEN 'lead_distribution_private'
+           ELSE 'lead_distribution_shared' END,
       NOW()
     FROM moved
+    JOIN public.pools p ON p.id = moved.proposed_pool_id
     RETURNING 1
   )
   SELECT COUNT(*) INTO n FROM audited;
