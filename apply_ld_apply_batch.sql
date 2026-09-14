@@ -17,6 +17,22 @@ ALTER TABLE public.ld_apply_batch
 ALTER TABLE public.companies
   ADD COLUMN IF NOT EXISTS "campaignId" text;
 
+-- UI Campaign = pools.type Campaign. Flip our parent bags if the enum exists.
+DO $$
+BEGIN
+  UPDATE public.pools
+  SET type = 'CAMPAIGN'::pool_type, "updatedAt" = CURRENT_TIMESTAMP
+  WHERE id LIKE 'ld_pool_%'
+    AND type::text <> 'PRIVATE';
+
+  UPDATE public.pool_links
+  SET "parentType" = 'CAMPAIGN'::pool_type, "updatedAt" = CURRENT_TIMESTAMP
+  WHERE "parentType"::text = 'STANDARD';
+EXCEPTION
+  WHEN invalid_text_representation THEN
+    RAISE NOTICE 'pool_type has no CAMPAIGN; parents stay STANDARD';
+END $$;
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -60,8 +76,8 @@ BEGIN
       CURRENT_TIMESTAMP,
       CURRENT_TIMESTAMP
     FROM public.pools p
-    WHERE p.type = 'STANDARD'
-      AND p.id LIKE 'ld_pool_%'
+    WHERE p.id LIKE 'ld_pool_%'
+      AND p.type::text IN ('STANDARD', 'CAMPAIGN')
     ON CONFLICT (id) DO UPDATE
     SET
       name = EXCLUDED.name,
@@ -104,7 +120,7 @@ BEGIN
       b.proposed_pool_id,
       COALESCE(
         NULLIF(b.proposed_campaign_id, ''),
-        CASE WHEN p.type = 'STANDARD' THEN b.proposed_pool_id END
+        CASE WHEN p.type::text IN ('STANDARD', 'CAMPAIGN') THEN b.proposed_pool_id END
       ) AS proposed_campaign_id,
       c."poolId" AS old_pool_id
     FROM public.ld_apply_batch b
@@ -112,7 +128,7 @@ BEGIN
     JOIN public.pools p ON p.id = b.proposed_pool_id
     WHERE b.proposed_pool_id IS NOT NULL
       AND (
-        p.type = 'STANDARD'
+        p.type::text IN ('STANDARD', 'CAMPAIGN')
         OR (
           p.type = 'PRIVATE'
           AND EXISTS (
@@ -188,7 +204,7 @@ BEGIN
         b.company_id,
         COALESCE(
           NULLIF(b.proposed_campaign_id, ''),
-          CASE WHEN p.type = 'STANDARD' THEN b.proposed_pool_id END
+          CASE WHEN p.type::text IN ('STANDARD', 'CAMPAIGN') THEN b.proposed_pool_id END
         ) AS proposed_campaign_id
       FROM public.ld_apply_batch b
       JOIN public.pools p ON p.id = b.proposed_pool_id

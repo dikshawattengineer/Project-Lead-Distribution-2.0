@@ -10,7 +10,7 @@
 # MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
 # MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
-# MAGIC Tag → STANDARD parent. If that parent has active `pool_links`,
+# MAGIC Tag → CAMPAIGN / STANDARD parent. If that parent has active `pool_links`,
 # MAGIC fair-share non-sticky companies onto those PRIVATE children.
 
 # COMMAND ----------
@@ -649,7 +649,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC %md
 # MAGIC ## Step 3 — Propose pool
 # MAGIC
-# MAGIC Tag → **parent** STANDARD pool via `crm_pool_rule` (snapshot).
+# MAGIC Tag → **parent** CAMPAIGN (or STANDARD) pool via `crm_pool_rule` (snapshot).
 # MAGIC Next cell: if that parent has `pool_links`, fair-share to PRIVATE children.
 # MAGIC Sticky still wins: callback / locked stay; complaint uses the rule.
 
@@ -762,7 +762,7 @@ display(_links)
 # MAGIC     `childPoolId` AS child_pool_id
 # MAGIC   FROM crm_load.new_crm.snap_pool_links
 # MAGIC   WHERE COALESCE(`isActive`, true) = true
-# MAGIC     AND CAST(`parentType` AS STRING) = 'STANDARD'
+# MAGIC     AND CAST(`parentType` AS STRING) IN ('STANDARD', 'CAMPAIGN')
 # MAGIC     AND CAST(`childType` AS STRING) = 'PRIVATE'
 # MAGIC ),
 # MAGIC members AS (
