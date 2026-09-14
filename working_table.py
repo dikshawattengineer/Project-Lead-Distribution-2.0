@@ -10,7 +10,7 @@
 # MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
 # MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
-# MAGIC **Stops at shared pools. No profileId / agent fair-share in this notebook.**
+# MAGIC **Stops at STANDARD shared (parent) pools. No profileId / PRIVATE agent pools.**
 
 # COMMAND ----------
 
@@ -82,11 +82,11 @@ for table in [
     "company_sites",
     "site_meters",
     "callbacks",
-    "crm_pool",
+    "pools",
     "crm_pool_rule",
     "notes",
     "profiles",
-    "crm_company_pool_audit",
+    "company_pool_audits",
 ]:
     df = jdbc_table(f"public.{table}")
     dest = f"crm_load.new_crm.snap_{table}"
@@ -441,7 +441,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC ),
 # MAGIC complaint_xfer AS (
 # MAGIC   SELECT DISTINCT `companyId` AS company_id
-# MAGIC   FROM crm_load.new_crm.snap_crm_company_pool_audit
+# MAGIC   FROM crm_load.new_crm.snap_company_pool_audits
 # MAGIC   WHERE `poolId` = 'ld_pool_complaint'
 # MAGIC ),
 # MAGIC last_deals AS (
@@ -511,7 +511,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC LEFT JOIN complaint_xfer xf ON co.id = xf.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_rejected_deal_companies rd ON co.id = rd.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_exclusively_deenergised de ON co.id = de.company_id
-# MAGIC LEFT JOIN crm_load.new_crm.snap_crm_pool pl ON co.`poolId` = pl.id
+# MAGIC LEFT JOIN crm_load.new_crm.snap_pools pl ON co.`poolId` = pl.id
 # MAGIC ;
 
 # COMMAND ----------
@@ -647,10 +647,10 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC %md
 # MAGIC ## Step 3 — Propose pool
 # MAGIC
-# MAGIC Tag → **parent** shared pool via `crm_pool_rule` (snapshot).
-# MAGIC New pool = seed the pool + one rule row. No CASE edit.
-# MAGIC Custom split comes later. Sticky still wins: callback / locked stay; complaint uses the rule.
-# MAGIC Next: write the shared parent, then apply. No agent / profile share.
+# MAGIC Tag → **parent** STANDARD pool via `crm_pool_rule` (snapshot).
+# MAGIC New pool = seed `pools` type STANDARD + one rule row. No CASE edit.
+# MAGIC Custom split / PRIVATE agent pools later via `pool_links`.
+# MAGIC Sticky still wins: callback / locked stay; complaint uses the rule.
 
 # COMMAND ----------
 
@@ -727,7 +727,7 @@ print("crm_pool_rule", _rules.count())
 # MAGIC %md
 # MAGIC ## Step 4 — Write shared pools, then apply
 # MAGIC
-# MAGIC Companies go to the **shared parent** (Retentions, Past Retentions,
+# MAGIC Companies go to the **STANDARD shared parent** (Retentions, Past Retentions,
 # MAGIC Upselling, E.ON, BG, …). This cell writes `ld_apply_batch` **and**
 # MAGIC runs `ld_apply_batch_run()` here — no extra trip to Supabase.
 
@@ -776,4 +776,4 @@ print("apply companies_moved", _applied.collect()[0]["companies_moved"])
 # MAGIC That is the nightly cron. Do **not** also schedule `25_cron.sql` in Supabase
 # MAGIC or apply runs twice.
 # MAGIC
-# MAGIC No profile / agent fair-share. Parent vs private pool waits for the boss schema.
+# MAGIC No profile / PRIVATE agent allocate yet. That uses `pool_links` + `pool_profiles`.

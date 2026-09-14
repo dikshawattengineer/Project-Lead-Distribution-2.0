@@ -3,13 +3,14 @@
 
 BEGIN;
 
-INSERT INTO public.crm_pool (id, code, name, "isLocked", "createdAt", "updatedAt")
+INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
 VALUES
-  ('ld_pool_eon_dfv', 'EON_DFV', 'E.ON DFV', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ('ld_pool_eon_dfv', 'EON_DFV', 'E.ON DFV', 'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (id) DO UPDATE
 SET
   code = EXCLUDED.code,
   name = EXCLUDED.name,
+  type = EXCLUDED.type,
   "isLocked" = EXCLUDED."isLocked",
   "updatedAt" = CURRENT_TIMESTAMP;
 

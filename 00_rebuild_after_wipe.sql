@@ -1,20 +1,29 @@
 -- After a Dev DB wipe, recreate ONLY our lead-distribution objects.
--- Prisma/CRM tables (companies, crm_pool, profiles, contracts, …) come from
+-- Prisma/CRM tables (companies, pools, profiles, contracts, …) come from
 -- the boss / app migrate first. Then run these files IN ORDER in Supabase:
 --
 --   1) 01_schema_and_seeds.sql          crm_provider_family, crm_pool_rule
 --   2) 09_sync_provider_family.sql      name patterns + fill family map
---   3) 04_seed_supplier_shared_pools.sql  shared ld_pool_* + tag rules
+--   3) 04_seed_supplier_shared_pools.sql  shared ld_pool_* (type STANDARD) + tag rules
 --      (includes Retention, Upselling, Customer Care, Corporate)
---   4) 02_split_schema.sql              policy / member / filter (keep for later
---      parent/private pool). Not used while we stop at shared apply.
+--   4) 02_split_schema.sql              policy / member / filter (unused while
+--      apply stops at STANDARD shared pools)
 --   5) apply_ld_apply_batch.sql         ld_apply_batch + ld_apply_batch_run()
 --   6) 24_janitor.sql                   ld_janitor_run()
 --   7) 25_cron.sql                      docs only — cron is the Databricks Job
 --   8) 16 + last-sale fill              ONLY if sourcebridge exists (migrate)
 --
--- Do NOT run 18/19/21 (profile/agent share) until boss private-pool schema lands.
+-- Do NOT run 18/19/21 (profile/agent share). Allocate to PRIVATE agent pools
+-- waits until we wire pool_links + pool_profiles.
 -- Do NOT run 03 Tom/Dick/Harry or 20 unless you need that cleanup.
+--
+-- App tables we write into (Prisma-owned):
+--   pools                       type STANDARD = shared parent, PRIVATE = agent
+--   pool_links                  parent STANDARD → child PRIVATE (later)
+--   pool_profiles               who can work a pool (later)
+--   companies.poolId            current pool
+--   company_pool_placements     open/closed history of a company in a pool
+--   company_pool_audits         who moved the company
 --
 -- Tables / functions this script family owns:
 --   crm_provider_family
@@ -27,11 +36,9 @@
 --   ld_apply_batch
 --   ld_apply_batch_run()
 --   ld_janitor_run()
--- Shared pool ROWS in crm_pool (app table): ld_pool_eon, ld_pool_eon_dfv,
+-- Shared pool ROWS in pools (type STANDARD): ld_pool_eon, ld_pool_eon_dfv,
 --   ld_pool_bg, ld_pool_ub, ld_pool_other, ld_pool_complaint,
 --   ld_pool_unassigned, ld_pool_retention, ld_pool_retention_ooc,
 --   ld_pool_upselling, ld_pool_customer_care, ld_pool_corporate
---
--- Boss parent/private pool columns: wait for his schema, then adapt.
 
 SELECT 'See comments: run 01 → 09 → 04 → 02 → apply → 24 → 25' AS rebuild_order;

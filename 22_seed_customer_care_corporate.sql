@@ -4,13 +4,14 @@
 
 BEGIN;
 
-INSERT INTO public.crm_pool (id, code, name, "isLocked", "createdAt", "updatedAt")
+INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
 VALUES
-  ('ld_pool_customer_care', 'CUSTOMER_CARE', 'Customer Care', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_corporate',     'CORPORATE',     'Corporate',     false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ('ld_pool_customer_care', 'CUSTOMER_CARE', 'Customer Care', 'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_pool_corporate',     'CORPORATE',     'Corporate',     'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (id) DO UPDATE SET
   code = EXCLUDED.code,
   name = EXCLUDED.name,
+  type = EXCLUDED.type,
   "isLocked" = EXCLUDED."isLocked",
   "updatedAt" = CURRENT_TIMESTAMP;
 
@@ -49,7 +50,7 @@ ON CONFLICT (id) DO UPDATE SET
 COMMIT;
 
 SELECT id, code, name
-FROM public.crm_pool
+FROM public.pools
 WHERE id IN ('ld_pool_customer_care', 'ld_pool_corporate');
 
 SELECT priority, tag, "poolId"
