@@ -1,8 +1,8 @@
 -- Cron-safe apply. Same SQL every night after Databricks writes public.ld_apply_batch.
--- Empty batch = 0 updates (not an error).
+-- Empty batch = 0 pool moves (not an error).
 -- Writes STANDARD parents, or PRIVATE children that are active in pool_links.
--- Campaign stamp uses existing company_pool_placements.sourcePoolId = parent
--- (Retention / Past Retention / E.ON). Does not ALTER companies.
+-- Stamps companies.campaignId = parent pool (Retentions / E.ON / …) on every
+-- batch row so the Campaign column shows the parent after fair-share.
 -- Does not set profileId.
 
 CREATE TABLE IF NOT EXISTS public.ld_apply_batch (
@@ -11,12 +11,23 @@ CREATE TABLE IF NOT EXISTS public.ld_apply_batch (
   proposed_campaign_id text
 );
 
--- Our scratch table only (not Prisma). Adds the column if an older 2-col batch exists.
 ALTER TABLE public.ld_apply_batch
   ADD COLUMN IF NOT EXISTS proposed_campaign_id text;
 
--- Upsert campaigns from STANDARD parent pools. Databricks calls this every night.
--- No manual seed. New ld_pool_* parent → new campaign on the next job.
+ALTER TABLE public.companies
+  ADD COLUMN IF NOT EXISTS "campaignId" text;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'companies_campaignId_fkey'
+  ) THEN
+    ALTER TABLE public.companies
+      ADD CONSTRAINT companies_campaignId_fkey
+      FOREIGN KEY ("campaignId") REFERENCES public.campaigns(id);
+  END IF;
+END $$;
+
 CREATE OR REPLACE FUNCTION public.ld_seed_campaigns()
 RETURNS integer
 LANGUAGE plpgsql
@@ -69,13 +80,23 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
   n integer := 0;
+  n_camp integer := 0;
   actor uuid := '3fc12748-605f-4d13-ae70-eec60b55d726';
+  has_campaign boolean := false;
 BEGIN
   IF to_regclass('public.ld_apply_batch') IS NULL THEN
     RETURN 0;
   END IF;
 
   PERFORM public.ld_seed_campaigns();
+
+  SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'companies'
+      AND column_name = 'campaignId'
+  ) INTO has_campaign;
 
   WITH batch AS (
     SELECT
@@ -90,7 +111,6 @@ BEGIN
     JOIN public.companies c ON c.id = b.company_id
     JOIN public.pools p ON p.id = b.proposed_pool_id
     WHERE b.proposed_pool_id IS NOT NULL
-      AND c."poolId" IS DISTINCT FROM b.proposed_pool_id
       AND (
         p.type = 'STANDARD'
         OR (
@@ -105,21 +125,26 @@ BEGIN
         )
       )
   ),
+  pool_moves AS (
+    SELECT *
+    FROM batch
+    WHERE old_pool_id IS DISTINCT FROM proposed_pool_id
+  ),
   closed AS (
     UPDATE public.company_pool_placements pl
     SET "endedAt" = NOW()
-    FROM batch
-    WHERE pl."companyId" = batch.company_id
+    FROM pool_moves m
+    WHERE pl."companyId" = m.company_id
       AND pl."endedAt" IS NULL
     RETURNING 1
   ),
   moved AS (
     UPDATE public.companies c
-    SET "poolId" = batch.proposed_pool_id,
+    SET "poolId" = m.proposed_pool_id,
         "updatedAt" = NOW()
-    FROM batch
-    WHERE c.id = batch.company_id
-    RETURNING c.id, batch.proposed_pool_id, batch.old_pool_id, batch.proposed_campaign_id
+    FROM pool_moves m
+    WHERE c.id = m.company_id
+    RETURNING c.id, m.proposed_pool_id, m.old_pool_id, m.proposed_campaign_id
   ),
   placed AS (
     INSERT INTO public.company_pool_placements
@@ -153,10 +178,34 @@ BEGIN
   )
   SELECT COUNT(*) INTO n FROM audited;
 
+  IF has_campaign THEN
+    UPDATE public.companies c
+    SET
+      "campaignId" = x.proposed_campaign_id,
+      "updatedAt" = NOW()
+    FROM (
+      SELECT
+        b.company_id,
+        COALESCE(
+          NULLIF(b.proposed_campaign_id, ''),
+          CASE WHEN p.type = 'STANDARD' THEN b.proposed_pool_id END
+        ) AS proposed_campaign_id
+      FROM public.ld_apply_batch b
+      JOIN public.pools p ON p.id = b.proposed_pool_id
+    ) x
+    WHERE c.id = x.company_id
+      AND x.proposed_campaign_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM public.campaigns cam WHERE cam.id = x.proposed_campaign_id)
+      AND c."campaignId" IS DISTINCT FROM x.proposed_campaign_id;
+
+    GET DIAGNOSTICS n_camp = ROW_COUNT;
+    RAISE NOTICE 'campaigns stamped %', n_camp;
+  END IF;
+
   RETURN n;
 END;
 $$;
 
 -- Databricks Step 4 calls this after it writes ld_apply_batch.
--- Manual check in SQL editor:
+-- Manual check:
 -- SELECT public.ld_apply_batch_run() AS companies_moved;
