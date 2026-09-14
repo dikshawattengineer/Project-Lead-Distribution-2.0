@@ -36,12 +36,18 @@ END $$;
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'companies_campaignId_fkey'
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = 'public.companies'::regclass
+      AND conname ILIKE 'companies_campaignid_fkey'
   ) THEN
     ALTER TABLE public.companies
       ADD CONSTRAINT companies_campaignId_fkey
       FOREIGN KEY ("campaignId") REFERENCES public.campaigns(id);
   END IF;
+EXCEPTION
+  WHEN duplicate_object THEN
+    NULL;
 END $$;
 
 CREATE OR REPLACE FUNCTION public.ld_seed_campaigns()
