@@ -110,8 +110,6 @@ BEGIN
     RETURN 0;
   END IF;
 
-  PERFORM public.ld_seed_campaigns();
-
   SELECT EXISTS (
     SELECT 1
     FROM information_schema.columns

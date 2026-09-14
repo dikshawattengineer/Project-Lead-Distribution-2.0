@@ -855,17 +855,7 @@ display(_links)
 # MAGIC plus `proposed_campaign_id` = parent (Retention / E.ON / …).
 # MAGIC Apply moves the pool and writes that parent on
 # MAGIC `company_pool_placements.sourcePoolId` (no ALTER on companies).
-# MAGIC Campaigns are upserted from STANDARD parent pools here — no manual seed.
-
-# COMMAND ----------
-
-# DBTITLE 1,upsert campaigns from parent pools
-try:
-    _camps = pg_query("SELECT public.ld_seed_campaigns() AS campaigns_upserted")
-    print("campaigns upserted", _camps.collect()[0]["campaigns_upserted"])
-    display(pg_query("SELECT id, name FROM public.campaigns ORDER BY name"))
-except Exception as exc:
-    print("campaign seed skip — run apply_ld_apply_batch.sql first:", str(exc)[:200])
+# MAGIC Campaign on the company is `sourcePoolId` (parent before split). No campaigns upsert.
 
 # COMMAND ----------
 
