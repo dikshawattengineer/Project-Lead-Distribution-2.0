@@ -731,6 +731,8 @@ print("crm_pool_rule", _rules.count())
 # MAGIC Reads `pool_links`. Parent with no children stays shared.
 # MAGIC Already on a valid child → keep. Sticky → not moved.
 # MAGIC New / on-parent companies → equal split across linked children.
+# MAGIC `parent_pool_id` is the campaign (Retention / Past Retention / E.ON / …)
+# MAGIC and is not changed when the lead moves into a PRIVATE child.
 
 # COMMAND ----------
 
@@ -850,7 +852,20 @@ display(_links)
 # MAGIC ## Step 4 — Write pools, then apply
 # MAGIC
 # MAGIC Writes `ld_apply_batch` (STANDARD parent, or PRIVATE child when linked)
-# MAGIC and runs `ld_apply_batch_run()` here.
+# MAGIC plus `proposed_campaign_id` = parent (Retention / E.ON / …).
+# MAGIC Apply moves the pool and writes that parent on
+# MAGIC `company_pool_placements.sourcePoolId` (no ALTER on companies).
+# MAGIC Campaigns are upserted from STANDARD parent pools here — no manual seed.
+
+# COMMAND ----------
+
+# DBTITLE 1,upsert campaigns from parent pools
+try:
+    _camps = pg_query("SELECT public.ld_seed_campaigns() AS campaigns_upserted")
+    print("campaigns upserted", _camps.collect()[0]["campaigns_upserted"])
+    display(pg_query("SELECT id, name FROM public.campaigns ORDER BY name"))
+except Exception as exc:
+    print("campaign seed skip — run apply_ld_apply_batch.sql first:", str(exc)[:200])
 
 # COMMAND ----------
 
@@ -875,14 +890,17 @@ def _write_apply_batch(moves_df, label):
 
 shared_moves = spark.sql(
     """
-    SELECT company_id, proposed_pool_id
+    SELECT
+      company_id,
+      proposed_pool_id,
+      parent_pool_id AS proposed_campaign_id
     FROM crm_load.new_crm.ld_working
     WHERE COALESCE(is_protected, false) = false
       AND proposed_pool_id IS NOT NULL
-      AND COALESCE(current_pool_id, '') <> COALESCE(proposed_pool_id, '')
+      AND parent_pool_id IS NOT NULL
     """
 )
-_write_apply_batch(shared_moves, "pool rows (parent or linked child)")
+_write_apply_batch(shared_moves, "pool + campaign rows (parent or linked child)")
 
 _applied = pg_query("SELECT public.ld_apply_batch_run() AS companies_moved")
 print("apply companies_moved", _applied.collect()[0]["companies_moved"])
@@ -893,6 +911,6 @@ print("apply companies_moved", _applied.collect()[0]["companies_moved"])
 # MAGIC ## Cron = this notebook
 # MAGIC
 # MAGIC Databricks Job on this notebook (top to bottom):
-# MAGIC **Password → Janitor → Snapshot → tag → parent → fair-share links → apply.**
+# MAGIC **Password → Janitor → Snapshot → tag → parent → fair-share → campaigns → apply.**
 # MAGIC That is the nightly cron. Do **not** also schedule `25_cron.sql` in Supabase
 # MAGIC or apply runs twice.
