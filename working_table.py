@@ -9,8 +9,9 @@
 # MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): E.ON deemed/flexible/variable
 # MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
 # MAGIC
-# MAGIC `source_kind` on `ld_working`: `RETENTION` (fallback / load source) or `SUPPLIER`
-# MAGIC (later files via `company_sites.loadSourceId`). Retention + no CED → Unassigned.
+# MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings.source`
+# MAGIC (same table fallback uses for LIKE '%retention%'). Later supplier files can
+# MAGIC also stamp `company_sites.loadSourceId`. Scratch only — no CRM ALTER.
 # MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
 # MAGIC Tag → CAMPAIGN / STANDARD parent. If that parent has active `pool_links`,
@@ -127,6 +128,21 @@ except Exception as e:
         "crm_load.new_crm.snap_crm_load_source"
     )
     print("crm_load_source skip", str(e)[:160])
+
+try:
+    maps = jdbc_table("public.legacy_site_mappings")
+    maps.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_legacy_site_mappings"
+    )
+    print("legacy_site_mappings", maps.count())
+except Exception as e:
+    spark.createDataFrame(
+        [],
+        "companyId string, companySiteId string, source string, migratedAt timestamp",
+    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_legacy_site_mappings"
+    )
+    print("legacy_site_mappings skip", str(e)[:160])
 
 sites = spark.table("crm_load.new_crm.snap_company_sites")
 if "loadSourceId" not in sites.columns:
@@ -489,17 +505,40 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC ),
 # MAGIC load_src AS (
 # MAGIC   SELECT
-# MAGIC     s.`companyId` AS company_id,
+# MAGIC     x.company_id,
 # MAGIC     CASE
-# MAGIC       WHEN SUM(CASE WHEN src.kind = 'RETENTION' THEN 1 ELSE 0 END) > 0 THEN 'RETENTION'
-# MAGIC       WHEN SUM(CASE WHEN src.kind = 'SUPPLIER' THEN 1 ELSE 0 END) > 0 THEN 'SUPPLIER'
+# MAGIC       WHEN MAX(CASE WHEN x.is_retention THEN 1 ELSE 0 END) > 0 THEN 'RETENTION'
+# MAGIC       WHEN MAX(CASE WHEN x.has_mapping THEN 1 ELSE 0 END) > 0 THEN 'SUPPLIER'
+# MAGIC       WHEN MAX(CASE WHEN x.site_kind = 'RETENTION' THEN 1 ELSE 0 END) > 0 THEN 'RETENTION'
+# MAGIC       WHEN MAX(CASE WHEN x.site_kind = 'SUPPLIER' THEN 1 ELSE 0 END) > 0 THEN 'SUPPLIER'
 # MAGIC     END AS source_kind,
-# MAGIC     MAX(src.family) AS source_family,
-# MAGIC     MAX(src.id) AS load_source_id
-# MAGIC   FROM crm_load.new_crm.snap_company_sites s
-# MAGIC   LEFT JOIN crm_load.new_crm.snap_crm_load_source src
-# MAGIC     ON src.id = s.`loadSourceId`
-# MAGIC   GROUP BY s.`companyId`
+# MAGIC     MAX(x.mapping_source) AS mapping_source,
+# MAGIC     MAX(x.site_family) AS source_family,
+# MAGIC     MAX(x.site_source_id) AS load_source_id
+# MAGIC   FROM (
+# MAGIC     SELECT
+# MAGIC       m.`companyId` AS company_id,
+# MAGIC       LOWER(COALESCE(m.source, '')) LIKE '%retention%' AS is_retention,
+# MAGIC       true AS has_mapping,
+# MAGIC       m.source AS mapping_source,
+# MAGIC       CAST(NULL AS STRING) AS site_kind,
+# MAGIC       CAST(NULL AS STRING) AS site_family,
+# MAGIC       CAST(NULL AS STRING) AS site_source_id
+# MAGIC     FROM crm_load.new_crm.snap_legacy_site_mappings m
+# MAGIC     UNION ALL
+# MAGIC     SELECT
+# MAGIC       s.`companyId` AS company_id,
+# MAGIC       false AS is_retention,
+# MAGIC       false AS has_mapping,
+# MAGIC       CAST(NULL AS STRING) AS mapping_source,
+# MAGIC       src.kind AS site_kind,
+# MAGIC       src.family AS site_family,
+# MAGIC       src.id AS site_source_id
+# MAGIC     FROM crm_load.new_crm.snap_company_sites s
+# MAGIC     LEFT JOIN crm_load.new_crm.snap_crm_load_source src
+# MAGIC       ON src.id = s.`loadSourceId`
+# MAGIC   ) x
+# MAGIC   GROUP BY x.company_id
 # MAGIC )
 # MAGIC SELECT
 # MAGIC   co.id                                            AS company_id,
@@ -534,9 +573,10 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   ls.last_deal_end_date                        AS lastDealEndDate,
 # MAGIC   ls.fallback_source,
 # MAGIC   CASE
+# MAGIC     WHEN src.source_kind IS NOT NULL THEN src.source_kind
 # MAGIC     WHEN ls.company_id IS NOT NULL THEN 'RETENTION'
-# MAGIC     ELSE src.source_kind
 # MAGIC   END                                          AS source_kind,
+# MAGIC   src.mapping_source,
 # MAGIC   src.source_family,
 # MAGIC   src.load_source_id,
 # MAGIC   CASE WHEN cb.company_id IS NOT NULL THEN true ELSE false END AS has_open_callback,
@@ -671,6 +711,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   lastDealEndDate,
 # MAGIC   fallback_source,
 # MAGIC   source_kind,
+# MAGIC   mapping_source,
 # MAGIC   source_family,
 # MAGIC   load_source_id,
 # MAGIC   has_open_callback,
@@ -761,6 +802,7 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   w.lastDealEndDate,
 # MAGIC   w.fallback_source,
 # MAGIC   w.source_kind,
+# MAGIC   w.mapping_source,
 # MAGIC   w.source_family,
 # MAGIC   w.load_source_id,
 # MAGIC   w.has_open_callback,
@@ -891,6 +933,7 @@ display(_links)
 # MAGIC   w.lastDealEndDate,
 # MAGIC   w.fallback_source,
 # MAGIC   w.source_kind,
+# MAGIC   w.mapping_source,
 # MAGIC   w.source_family,
 # MAGIC   w.load_source_id,
 # MAGIC   w.has_open_callback,

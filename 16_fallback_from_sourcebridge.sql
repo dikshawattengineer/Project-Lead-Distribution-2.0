@@ -6,7 +6,7 @@
 --   not on fallback       → supplier rules (E.ON / BG / …)
 --
 -- Who is inserted:
---   1) legacy_site_mappings (this load is retention — every mapped company)
+--   1) legacy_site_mappings — this is the source table (LIKE '%retention%')
 --   2) company_sites.loadSourceId → crm_load_source.kind = RETENTION
 --   3) any meter with startDate AND endDate (keep until migration is done)
 --
