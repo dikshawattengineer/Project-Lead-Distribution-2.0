@@ -377,7 +377,125 @@ else:
 dead.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dead_dest)
 print("exclusively de-energised companies", dead.count())
 
+# Company clock: every contract on the company (companyId / siteId / meter).
+# Retention 1–540 beats Past beats Upselling. Fallback lastDealEndDate included.
+from pyspark.sql.window import Window
+
+contracts_s = spark.table("crm_load.new_crm.snap_contracts")
+print("contract columns", contracts_s.columns)
+print("site_meter columns", meters.columns)
+
+c_id = _col(contracts_s, "id")
+c_co = _col(contracts_s, "companyId")
+c_site = _col(contracts_s, "siteId")
+c_meter = _col(contracts_s, "siteMeterId")
+c_end = _col(contracts_s, "endDate")
+m_id = _col(meters, "id")
+m_site = _col(meters, "companySiteId", "siteId")
+
+ced_parts = []
+if c_co and c_end:
+    ced_parts.append(
+        contracts_s.where(F.col(c_end).isNotNull())
+        .select(
+            F.when(
+                F.trim(F.col(c_co).cast("string")) == "",
+                F.lit(None).cast("string"),
+            ).otherwise(F.trim(F.col(c_co).cast("string"))).alias("company_id"),
+            F.col(c_end).cast("date").alias("end_date"),
+            F.lit("companyId").alias("path"),
+        )
+        .where("company_id IS NOT NULL")
+    )
+if c_site and c_end and s_id and s_co:
+    ced_parts.append(
+        contracts_s.alias("c")
+        .join(sites_s.alias("s"), F.col(f"c.{c_site}") == F.col(f"s.{s_id}"), "inner")
+        .where(F.col(f"c.{c_end}").isNotNull())
+        .select(
+            F.col(f"s.{s_co}").alias("company_id"),
+            F.col(f"c.{c_end}").cast("date").alias("end_date"),
+            F.lit("siteId").alias("path"),
+        )
+        .where("company_id IS NOT NULL")
+    )
+if c_meter and c_end and m_id and m_site and s_id and s_co:
+    ced_parts.append(
+        contracts_s.alias("c")
+        .join(meters.alias("m"), F.col(f"c.{c_meter}") == F.col(f"m.{m_id}"), "inner")
+        .join(sites_s.alias("s"), F.col(f"m.{m_site}") == F.col(f"s.{s_id}"), "inner")
+        .where(F.col(f"c.{c_end}").isNotNull())
+        .select(
+            F.col(f"s.{s_co}").alias("company_id"),
+            F.col(f"c.{c_end}").cast("date").alias("end_date"),
+            F.lit("siteMeterId").alias("path"),
+        )
+        .where("company_id IS NOT NULL")
+    )
+else:
+    print("meter-contract join skipped — siteMeterId/companySiteId missing")
+
+try:
+    sale_s = spark.table("crm_load.new_crm.snap_crm_company_load_sale")
+    sale_co = _col(sale_s, "companyId")
+    sale_end = _col(sale_s, "lastDealEndDate")
+    if sale_co and sale_end:
+        ced_parts.append(
+            sale_s.where(F.col(sale_end).isNotNull())
+            .select(
+                F.col(sale_co).alias("company_id"),
+                F.col(sale_end).cast("date").alias("end_date"),
+                F.lit("fallback").alias("path"),
+            )
+            .where("company_id IS NOT NULL")
+        )
+except Exception as e:
+    print("fallback CED skip", str(e)[:160])
+
+if not ced_parts:
+    company_ced = spark.createDataFrame([], "company_id string, end_date date")
+else:
+    all_ced = ced_parts[0]
+    for extra in ced_parts[1:]:
+        all_ced = all_ced.unionByName(extra)
+    print("CED rows by path")
+    all_ced.groupBy("path").count().show(10, False)
+    days = F.datediff(F.col("end_date"), F.current_date())
+    bag = (
+        F.when((days >= 1) & (days <= 540), F.lit(0))
+        .when((days.isNull()) | (days < 1), F.lit(1))
+        .otherwise(F.lit(2))
+    )
+    wced = Window.partitionBy("company_id").orderBy(bag.asc(), F.col("end_date").desc_nulls_last())
+    company_ced = (
+        all_ced.withColumn("rn", F.row_number().over(wced))
+        .where("rn = 1")
+        .select("company_id", "end_date")
+    )
+
+company_ced.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+    "crm_load.new_crm.ld_company_ced"
+)
+ced_days = F.datediff(F.col("end_date"), F.current_date())
+print("company clock bags (0=Retention 1=Past 2=Upselling)")
+(
+    company_ced.withColumn(
+        "bag",
+        F.when((ced_days >= 1) & (ced_days <= 540), F.lit("RETENTION"))
+        .when((ced_days.isNull()) | (ced_days < 1), F.lit("PAST_RETENTION"))
+        .otherwise(F.lit("UPSELLING")),
+    )
+    .groupBy("bag")
+    .count()
+    .show(10, False)
+)
+print(
+    "Duthus clock",
+    company_ced.where("company_id = '94b37ad7-38d5-0839-da7c-b75aaba13003'").collect(),
+)
+
 # COMMAND ----------
+
 
 # MAGIC %md
 # MAGIC ## Working table (SQL)
@@ -463,25 +581,8 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   WHERE rn = 1
 # MAGIC ),
 # MAGIC latest_ced AS (
-# MAGIC   SELECT *
-# MAGIC   FROM (
-# MAGIC     SELECT
-# MAGIC       company_id,
-# MAGIC       end_date,
-# MAGIC       ROW_NUMBER() OVER (
-# MAGIC         PARTITION BY company_id
-# MAGIC         ORDER BY
-# MAGIC           CASE
-# MAGIC             WHEN raw_days_left BETWEEN 1 AND 540 THEN 0
-# MAGIC             WHEN raw_days_left IS NULL OR raw_days_left < 1 THEN 1
-# MAGIC             ELSE 2
-# MAGIC           END,
-# MAGIC           end_date DESC NULLS LAST
-# MAGIC       ) AS rn
-# MAGIC     FROM contracts_f
-# MAGIC     WHERE end_date IS NOT NULL
-# MAGIC   ) r
-# MAGIC   WHERE rn = 1
+# MAGIC   SELECT company_id, end_date
+# MAGIC   FROM crm_load.new_crm.ld_company_ced
 # MAGIC ),
 # MAGIC sites AS (
 # MAGIC   SELECT `companyId` AS company_id, COUNT(*) AS site_count
@@ -582,18 +683,10 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   COALESCE(w.is_dfv, false)                        AS is_win_dfv,
 # MAGIC   w.raw_days_left,
 # MAGIC   w.days_left,
-# MAGIC   COALESCE(
-# MAGIC     DATEDIFF(lc.end_date, CURRENT_DATE),
-# MAGIC     DATEDIFF(ls.last_deal_end_date, CURRENT_DATE)
-# MAGIC   ) AS last_deal_raw_days_left,
-# MAGIC   COALESCE(
-# MAGIC     CASE WHEN lc.end_date IS NOT NULL
-# MAGIC          THEN COALESCE(DATEDIFF(lc.end_date, CURRENT_DATE), 0)
-# MAGIC     END,
-# MAGIC     CASE WHEN ls.last_deal_end_date IS NOT NULL
-# MAGIC          THEN COALESCE(DATEDIFF(ls.last_deal_end_date, CURRENT_DATE), 0)
-# MAGIC     END
-# MAGIC   ) AS last_deal_days_left,
+# MAGIC   DATEDIFF(lc.end_date, CURRENT_DATE) AS last_deal_raw_days_left,
+# MAGIC   CASE WHEN lc.end_date IS NOT NULL
+# MAGIC        THEN COALESCE(DATEDIFF(lc.end_date, CURRENT_DATE), 0)
+# MAGIC   END AS last_deal_days_left,
 # MAGIC   ld.last_deal_days_since,
 # MAGIC   CASE
 # MAGIC     WHEN d.company_id IS NOT NULL THEN true
@@ -601,7 +694,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC     ELSE false
 # MAGIC   END AS has_any_past_deal,
 # MAGIC   ls.has_past_sale                             AS hasPastSale,
-# MAGIC   COALESCE(lc.end_date, ls.last_deal_end_date) AS lastDealEndDate,
+# MAGIC   lc.end_date AS lastDealEndDate,
 # MAGIC   ls.fallback_source,
 # MAGIC   CASE
 # MAGIC     WHEN src.source_kind IS NOT NULL THEN src.source_kind
