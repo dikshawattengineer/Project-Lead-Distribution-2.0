@@ -115,35 +115,19 @@ except Exception as e:
     )
     print("crm_company_load_sale skip", str(e)[:160])
 
-try:
-    src = jdbc_table("public.crm_load_source")
-    src.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_crm_load_source"
-    )
-    print("crm_load_source", src.count())
-except Exception as e:
-    spark.createDataFrame(
-        [],
-        "id string, name string, kind string, family string",
-    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_crm_load_source"
-    )
-    print("crm_load_source skip", str(e)[:160])
+# Source table is legacy_site_mappings (not crm_load_source).
+maps = jdbc_table("public.legacy_site_mappings")
+maps.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+    "crm_load.new_crm.snap_legacy_site_mappings"
+)
+print("legacy_site_mappings", maps.count(), maps.columns)
 
-try:
-    maps = jdbc_table("public.legacy_site_mappings")
-    maps.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_legacy_site_mappings"
-    )
-    print("legacy_site_mappings", maps.count())
-except Exception as e:
-    spark.createDataFrame(
-        [],
-        "companyId string, companySiteId string, source string, migratedAt timestamp",
-    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_legacy_site_mappings"
-    )
-    print("legacy_site_mappings skip", str(e)[:160])
+spark.createDataFrame(
+    [],
+    "id string, name string, kind string, family string",
+).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+    "crm_load.new_crm.snap_crm_load_source"
+)
 
 sites = spark.table("crm_load.new_crm.snap_company_sites")
 if "loadSourceId" not in sites.columns:
