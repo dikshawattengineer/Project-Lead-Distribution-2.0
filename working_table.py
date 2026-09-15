@@ -9,6 +9,9 @@
 # MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): E.ON deemed/flexible/variable
 # MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
 # MAGIC
+# MAGIC `source_kind` on `ld_working`: `RETENTION` (fallback / load source) or `SUPPLIER`
+# MAGIC (later files via `company_sites.loadSourceId`). Retention + no CED → Unassigned.
+# MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
 # MAGIC Tag → CAMPAIGN / STANDARD parent. If that parent has active `pool_links`,
 # MAGIC fair-share non-sticky companies onto those PRIVATE children.
@@ -103,11 +106,33 @@ try:
     print("crm_company_load_sale", sale.count())
 except Exception as e:
     spark.createDataFrame(
-        [], "companyId string, lastDealEndDate date, hasPastSale boolean"
+        [],
+        "companyId string, companySiteId string, source string, hasPastSale boolean, lastDealEndDate date",
     ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
         "crm_load.new_crm.snap_crm_company_load_sale"
     )
     print("crm_company_load_sale skip", str(e)[:160])
+
+try:
+    src = jdbc_table("public.crm_load_source")
+    src.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_crm_load_source"
+    )
+    print("crm_load_source", src.count())
+except Exception as e:
+    spark.createDataFrame(
+        [],
+        "id string, name string, kind string, family string",
+    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_crm_load_source"
+    )
+    print("crm_load_source skip", str(e)[:160])
+
+sites = spark.table("crm_load.new_crm.snap_company_sites")
+if "loadSourceId" not in sites.columns:
+    sites.withColumn("loadSourceId", F.lit(None).cast("string")).write.mode(
+        "overwrite"
+    ).option("overwriteSchema", "true").saveAsTable("crm_load.new_crm.snap_company_sites")
 
 # Stamp DFV on the winning-contract type column (Nightly 1/2/4 or deemed/flexible/variable).
 contracts = spark.table("crm_load.new_crm.snap_contracts")
@@ -458,8 +483,23 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   SELECT
 # MAGIC     `companyId` AS company_id,
 # MAGIC     `lastDealEndDate` AS last_deal_end_date,
-# MAGIC     COALESCE(`hasPastSale`, true) AS has_past_sale
+# MAGIC     COALESCE(`hasPastSale`, true) AS has_past_sale,
+# MAGIC     source AS fallback_source
 # MAGIC   FROM crm_load.new_crm.snap_crm_company_load_sale
+# MAGIC ),
+# MAGIC load_src AS (
+# MAGIC   SELECT
+# MAGIC     s.`companyId` AS company_id,
+# MAGIC     CASE
+# MAGIC       WHEN SUM(CASE WHEN src.kind = 'RETENTION' THEN 1 ELSE 0 END) > 0 THEN 'RETENTION'
+# MAGIC       WHEN SUM(CASE WHEN src.kind = 'SUPPLIER' THEN 1 ELSE 0 END) > 0 THEN 'SUPPLIER'
+# MAGIC     END AS source_kind,
+# MAGIC     MAX(src.family) AS source_family,
+# MAGIC     MAX(src.id) AS load_source_id
+# MAGIC   FROM crm_load.new_crm.snap_company_sites s
+# MAGIC   LEFT JOIN crm_load.new_crm.snap_crm_load_source src
+# MAGIC     ON src.id = s.`loadSourceId`
+# MAGIC   GROUP BY s.`companyId`
 # MAGIC )
 # MAGIC SELECT
 # MAGIC   co.id                                            AS company_id,
@@ -480,7 +520,9 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   ) AS last_deal_raw_days_left,
 # MAGIC   COALESCE(
 # MAGIC     ld.last_deal_days_left,
-# MAGIC     COALESCE(DATEDIFF(ls.last_deal_end_date, CURRENT_DATE), 0)
+# MAGIC     CASE WHEN ls.last_deal_end_date IS NOT NULL
+# MAGIC          THEN COALESCE(DATEDIFF(ls.last_deal_end_date, CURRENT_DATE), 0)
+# MAGIC     END
 # MAGIC   ) AS last_deal_days_left,
 # MAGIC   ld.last_deal_days_since,
 # MAGIC   CASE
@@ -488,6 +530,15 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC     WHEN COALESCE(ls.has_past_sale, false) THEN true
 # MAGIC     ELSE false
 # MAGIC   END AS has_any_past_deal,
+# MAGIC   ls.has_past_sale                             AS hasPastSale,
+# MAGIC   ls.last_deal_end_date                        AS lastDealEndDate,
+# MAGIC   ls.fallback_source,
+# MAGIC   CASE
+# MAGIC     WHEN ls.company_id IS NOT NULL THEN 'RETENTION'
+# MAGIC     ELSE src.source_kind
+# MAGIC   END                                          AS source_kind,
+# MAGIC   src.source_family,
+# MAGIC   src.load_source_id,
 # MAGIC   CASE WHEN cb.company_id IS NOT NULL THEN true ELSE false END AS has_open_callback,
 # MAGIC   cb.callback_owner_pool_id,
 # MAGIC   COALESCE(pl.`isLocked`, false)                   AS is_current_pool_locked,
@@ -509,6 +560,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC LEFT JOIN crm_load.new_crm.snap_deal_companies d ON co.id = d.company_id
 # MAGIC LEFT JOIN last_deals ld ON co.id = ld.company_id
 # MAGIC LEFT JOIN load_sale ls ON co.id = ls.company_id
+# MAGIC LEFT JOIN load_src src ON co.id = src.company_id
 # MAGIC LEFT JOIN complaint_notes cn ON co.id = cn.company_id
 # MAGIC LEFT JOIN complaint_xfer xf ON co.id = xf.company_id
 # MAGIC LEFT JOIN crm_load.new_crm.snap_rejected_deal_companies rd ON co.id = rd.company_id
@@ -570,7 +622,8 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       THEN 'CUSTOMER_CARE'
 # MAGIC     WHEN has_any_past_deal AND NOT COALESCE(has_rejected_deal, false) THEN
 # MAGIC       CASE
-# MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN 'PAST_RETENTION'
+# MAGIC         WHEN last_deal_raw_days_left IS NULL THEN 'UNASSIGNED'
+# MAGIC         WHEN last_deal_days_left < 1 THEN 'PAST_RETENTION'
 # MAGIC         WHEN last_deal_days_left <= 540 THEN 'RETENTION'
 # MAGIC         ELSE 'UPSELLING'
 # MAGIC       END
@@ -614,6 +667,12 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   last_deal_days_left,
 # MAGIC   last_deal_days_since,
 # MAGIC   has_any_past_deal,
+# MAGIC   hasPastSale,
+# MAGIC   lastDealEndDate,
+# MAGIC   fallback_source,
+# MAGIC   source_kind,
+# MAGIC   source_family,
+# MAGIC   load_source_id,
 # MAGIC   has_open_callback,
 # MAGIC   callback_owner_pool_id,
 # MAGIC   is_current_pool_locked,
@@ -698,6 +757,12 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   w.last_deal_days_left,
 # MAGIC   w.last_deal_days_since,
 # MAGIC   w.has_any_past_deal,
+# MAGIC   w.hasPastSale,
+# MAGIC   w.lastDealEndDate,
+# MAGIC   w.fallback_source,
+# MAGIC   w.source_kind,
+# MAGIC   w.source_family,
+# MAGIC   w.load_source_id,
 # MAGIC   w.has_open_callback,
 # MAGIC   w.callback_owner_pool_id,
 # MAGIC   w.is_current_pool_locked,
@@ -822,6 +887,12 @@ display(_links)
 # MAGIC   w.last_deal_days_left,
 # MAGIC   w.last_deal_days_since,
 # MAGIC   w.has_any_past_deal,
+# MAGIC   w.hasPastSale,
+# MAGIC   w.lastDealEndDate,
+# MAGIC   w.fallback_source,
+# MAGIC   w.source_kind,
+# MAGIC   w.source_family,
+# MAGIC   w.load_source_id,
 # MAGIC   w.has_open_callback,
 # MAGIC   w.callback_owner_pool_id,
 # MAGIC   w.is_current_pool_locked,
@@ -901,6 +972,6 @@ print("apply companies_moved", _applied.collect()[0]["companies_moved"])
 # MAGIC ## Cron = this notebook
 # MAGIC
 # MAGIC Databricks Job on this notebook (top to bottom):
-# MAGIC **Password → Janitor → Snapshot → tag → parent → fair-share → campaigns → apply.**
+# MAGIC **Password → Janitor → Snapshot → tag → parent → fair-share → apply.**
 # MAGIC That is the nightly cron. Do **not** also schedule `25_cron.sql` in Supabase
 # MAGIC or apply runs twice.
