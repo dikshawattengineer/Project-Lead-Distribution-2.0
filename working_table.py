@@ -512,11 +512,6 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
     .count()
     .show(10, False)
 )
-spark.table("crm_load.new_crm.snap_companies").where(
-    "lower(name) like '%duthus%'"
-).select(F.col("id").alias("company_id"), "name").join(
-    company_ced, "company_id", "left"
-).show(10, False)
 
 # COMMAND ----------
 
@@ -901,21 +896,6 @@ spark.table("crm_load.new_crm.snap_companies").where(
 # MAGIC FROM crm_load.new_crm.ld_working
 # MAGIC GROUP BY lead_tag, is_win_dfv, is_protected
 # MAGIC ORDER BY companies DESC
-# MAGIC ;
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT
-# MAGIC   co.name,
-# MAGIC   w.lead_tag,
-# MAGIC   w.lastDealEndDate,
-# MAGIC   w.last_deal_days_left
-# MAGIC FROM crm_load.new_crm.ld_working w
-# MAGIC JOIN crm_load.new_crm.snap_companies co
-# MAGIC   ON co.id = w.company_id
-# MAGIC WHERE LOWER(co.name) LIKE '%duthus%'
-# MAGIC    OR LOWER(co.name) LIKE '%beeby%'
 # MAGIC ;
 
 # COMMAND ----------
