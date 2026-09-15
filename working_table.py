@@ -934,6 +934,7 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   w.current_pool_id,
 # MAGIC   w.lead_tag,
 # MAGIC   CASE
+# MAGIC     WHEN w.lead_tag = 'COMPLAINT' THEN COALESCE(r.`poolId`, 'ld_pool_complaint')
 # MAGIC     WHEN w.lead_tag = 'CALLBACK' THEN COALESCE(w.callback_owner_pool_id, w.current_pool_id)
 # MAGIC     WHEN w.lead_tag = 'LOCKED' THEN w.current_pool_id
 # MAGIC     WHEN COALESCE(w.is_protected, false) AND w.lead_tag <> 'COMPLAINT' THEN w.current_pool_id

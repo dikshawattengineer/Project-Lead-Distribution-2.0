@@ -7,7 +7,8 @@ BEGIN;
 INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
 VALUES
   ('ld_pool_customer_care', 'CUSTOMER_CARE', 'Customer Care', 'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_corporate',     'CORPORATE',     'Corporate',     'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ('ld_pool_corporate',     'CORPORATE',     'Corporate',     'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_pool_complaint',     'COMPLAINT',     'Complaint',     'STANDARD', true,  CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (id) DO UPDATE SET
   code = EXCLUDED.code,
   name = EXCLUDED.name,
@@ -32,6 +33,10 @@ INSERT INTO public.crm_pool_rule
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 VALUES
   (
+    'ld_rule_complaint', 10, 'COMPLAINT', 'ld_pool_complaint', true,
+    'Ongoing complaint note — locked Complaint pool', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+  ),
+  (
     'ld_rule_customer_care', 11, 'CUSTOMER_CARE', 'ld_pool_customer_care', true,
     'Past sale, 7–60 days since last sale', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
   ),
@@ -49,9 +54,9 @@ ON CONFLICT (id) DO UPDATE SET
 
 COMMIT;
 
-SELECT id, code, name
+SELECT id, code, name, "isLocked"
 FROM public.pools
-WHERE id IN ('ld_pool_customer_care', 'ld_pool_corporate');
+WHERE id IN ('ld_pool_customer_care', 'ld_pool_corporate', 'ld_pool_complaint');
 
 SELECT priority, tag, "poolId"
 FROM public.crm_pool_rule
