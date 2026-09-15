@@ -1,5 +1,5 @@
--- Fill lastDealEndDate from the SOONEST meter that has startDate AND endDate.
--- Empty sister meter is ignored (not treated as day 0).
+-- Fill lastDealEndDate from the LATEST contract endDate on the company
+-- (all sites / meters). Empty sister meter is ignored (not day 0).
 -- Run after 16 if you need a second pass. Safe to re-run. Does not change poolId.
 
 UPDATE public.crm_company_load_sale sl
@@ -14,16 +14,23 @@ FROM (
     end_date
   FROM (
     SELECT
-      COALESCE(NULLIF(BTRIM(c."companyId"), ''), s."companyId") AS company_id,
-      COALESCE(c."siteId", s.id) AS site_id,
+      COALESCE(
+        NULLIF(BTRIM(c."companyId"), ''),
+        s."companyId",
+        s2."companyId"
+      ) AS company_id,
+      COALESCE(c."siteId", s.id, s2.id) AS site_id,
       c."endDate"::date AS end_date
     FROM public.contracts c
     LEFT JOIN public.company_sites s
       ON s.id = c."siteId"
-    WHERE c."startDate" IS NOT NULL
-      AND c."endDate" IS NOT NULL
+    LEFT JOIN public.site_meters sm
+      ON sm.id = c."siteMeterId"
+    LEFT JOIN public.company_sites s2
+      ON s2.id = sm."companySiteId"
+    WHERE c."endDate" IS NOT NULL
   ) d
   WHERE company_id IS NOT NULL
-  ORDER BY company_id, end_date ASC NULLS LAST
+  ORDER BY company_id, end_date DESC NULLS LAST
 ) x
 WHERE sl."companyId" = x.company_id;
