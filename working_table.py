@@ -466,6 +466,20 @@ else:
         .when((days.isNull()) | (days < 1), F.lit(1))
         .otherwise(F.lit(2))
     )
+    mixed = (
+        all_ced.withColumn("days", days)
+        .withColumn("bag", bag)
+        .groupBy("company_id")
+        .agg(
+            F.max(F.when(F.col("bag") == 0, 1).otherwise(0)).alias("has_ret"),
+            F.max(F.when(F.col("bag") == 1, 1).otherwise(0)).alias("has_past"),
+            F.max(F.when(F.col("bag") == 2, 1).otherwise(0)).alias("has_up"),
+        )
+    )
+    print(
+        "companies with both a 1-540 CED and a past CED (these move Past → Retention):",
+        mixed.where("has_ret = 1 AND has_past = 1").count(),
+    )
     wced = Window.partitionBy("company_id").orderBy(bag.asc(), F.col("end_date").desc_nulls_last())
     company_ced = (
         all_ced.withColumn("rn", F.row_number().over(wced))
@@ -488,10 +502,6 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
     .groupBy("bag")
     .count()
     .show(10, False)
-)
-print(
-    "Duthus clock",
-    company_ced.where("company_id = '94b37ad7-38d5-0839-da7c-b75aaba13003'").collect(),
 )
 
 # COMMAND ----------
