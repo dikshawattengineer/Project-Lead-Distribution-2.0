@@ -460,31 +460,33 @@ else:
         all_ced = all_ced.unionByName(extra)
     print("CED rows by path")
     all_ced.groupBy("path").count().show(10, False)
-    days = F.datediff(F.col("end_date"), F.current_date())
-    bag = (
-        F.when((days >= 1) & (days <= 540), F.lit(0))
-        .when((days.isNull()) | (days < 1), F.lit(1))
-        .otherwise(F.lit(2))
-    )
-    mixed = (
-        all_ced.withColumn("days", days)
-        .withColumn("bag", bag)
-        .groupBy("company_id")
-        .agg(
-            F.max(F.when(F.col("bag") == 0, 1).otherwise(0)).alias("has_ret"),
-            F.max(F.when(F.col("bag") == 1, 1).otherwise(0)).alias("has_past"),
-            F.max(F.when(F.col("bag") == 2, 1).otherwise(0)).alias("has_up"),
+    ranked = (
+        all_ced
+        .withColumn("days", F.datediff(F.col("end_date"), F.current_date()))
+        .withColumn(
+            "bag",
+            F.when((F.col("days") >= 1) & (F.col("days") <= 540), F.lit(0))
+            .when((F.col("days").isNull()) | (F.col("days") < 1), F.lit(1))
+            .otherwise(F.lit(2)),
         )
     )
     print(
         "companies with both a 1-540 CED and a past CED (these move Past → Retention):",
-        mixed.where("has_ret = 1 AND has_past = 1").count(),
+        ranked.groupBy("company_id")
+        .agg(
+            F.max(F.when(F.col("bag") == 0, 1).otherwise(0)).alias("has_ret"),
+            F.max(F.when(F.col("bag") == 1, 1).otherwise(0)).alias("has_past"),
+        )
+        .where("has_ret = 1 AND has_past = 1")
+        .count(),
     )
-    wced = Window.partitionBy("company_id").orderBy(bag.asc(), F.col("end_date").desc_nulls_last())
+    wced = Window.partitionBy("company_id").orderBy(
+        F.col("bag").asc(), F.col("end_date").desc_nulls_last()
+    )
     company_ced = (
-        all_ced.withColumn("rn", F.row_number().over(wced))
+        ranked.withColumn("rn", F.row_number().over(wced))
         .where("rn = 1")
-        .select("company_id", "end_date")
+        .select("company_id", "end_date", "days", "bag")
     )
 
 company_ced.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
@@ -503,6 +505,11 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
     .count()
     .show(10, False)
 )
+spark.table("crm_load.new_crm.snap_companies").where(
+    "lower(name) like '%duthus%'"
+).select(F.col("id").alias("company_id"), "name").join(
+    company_ced, "company_id", "left"
+).show(10, False)
 
 # COMMAND ----------
 
