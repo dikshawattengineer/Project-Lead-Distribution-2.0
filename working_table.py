@@ -480,13 +480,12 @@ else:
         .where("has_ret = 1 AND has_past = 1")
         .count(),
     )
-    wced = Window.partitionBy("company_id").orderBy(
-        F.col("bag").asc(), F.col("end_date").desc_nulls_last()
-    )
-    company_ced = (
-        ranked.withColumn("rn", F.row_number().over(wced))
-        .where("rn = 1")
-        .select("company_id", "end_date", "days", "bag")
+    company_ced = ranked.groupBy("company_id").agg(
+        F.coalesce(
+            F.max(F.when((F.col("days") >= 1) & (F.col("days") <= 540), F.col("end_date"))),
+            F.max(F.when((F.col("days").isNull()) | (F.col("days") < 1), F.col("end_date"))),
+            F.max("end_date"),
+        ).alias("end_date")
     )
 
 company_ced.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
@@ -598,25 +597,16 @@ spark.table("crm_load.new_crm.snap_companies").where(
 # MAGIC   WHERE rn = 1
 # MAGIC ),
 # MAGIC latest_ced AS (
-# MAGIC   SELECT company_id, end_date
-# MAGIC   FROM (
-# MAGIC     SELECT
-# MAGIC       company_id,
-# MAGIC       end_date,
-# MAGIC       ROW_NUMBER() OVER (
-# MAGIC         PARTITION BY company_id
-# MAGIC         ORDER BY
-# MAGIC           CASE
-# MAGIC             WHEN raw_days_left BETWEEN 1 AND 540 THEN 0
-# MAGIC             WHEN raw_days_left IS NULL OR raw_days_left < 1 THEN 1
-# MAGIC             ELSE 2
-# MAGIC           END,
-# MAGIC           end_date DESC NULLS LAST
-# MAGIC       ) AS rn
-# MAGIC     FROM contracts_f
-# MAGIC     WHERE end_date IS NOT NULL
-# MAGIC   ) r
-# MAGIC   WHERE rn = 1
+# MAGIC   SELECT
+# MAGIC     company_id,
+# MAGIC     COALESCE(
+# MAGIC       MAX(CASE WHEN raw_days_left BETWEEN 1 AND 540 THEN end_date END),
+# MAGIC       MAX(CASE WHEN raw_days_left IS NULL OR raw_days_left < 1 THEN end_date END),
+# MAGIC       MAX(end_date)
+# MAGIC     ) AS end_date
+# MAGIC   FROM contracts_f
+# MAGIC   WHERE end_date IS NOT NULL
+# MAGIC   GROUP BY company_id
 # MAGIC ),
 # MAGIC sites AS (
 # MAGIC   SELECT `companyId` AS company_id, COUNT(*) AS site_count
