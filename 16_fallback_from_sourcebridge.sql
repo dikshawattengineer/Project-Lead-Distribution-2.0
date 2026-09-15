@@ -7,13 +7,10 @@
 --   not on fallback → supplier rules (E.ON / BG / …)
 --
 -- Who is inserted:
---   1) legacy_site_mappings — this is the source table (LIKE '%retention%')
---   2) company_sites.loadSourceId → crm_load_source.kind = RETENTION
---   3) any meter with startDate AND endDate (keep until migration is done)
+--   1) legacy_site_mappings — THIS is the source table (LIKE '%retention%')
+--   2) any meter with startDate AND endDate (keep until migration is done)
 --
--- Supplier files later: stamp company_sites.loadSourceId = eon_supplier / bg_supplier / …
--- (crm_load_source.kind = SUPPLIER). Do NOT insert those into this table.
--- ld_working.source_kind will read that stamp so tag uses supplier rules.
+-- Do not use crm_load_source. Source is legacy_site_mappings.source.
 --
 -- CED: soonest dated meter only (start+end required). No two-site MIN-to-0.
 -- contracts use siteId, not companySiteId.
@@ -67,7 +64,7 @@ SELECT DISTINCT ON (u.company_id)
   u.end_date,
   CURRENT_TIMESTAMP
 FROM (
-  -- 1) Every mapped company (this file is a retention load)
+  -- 1) Retention rows from legacy_site_mappings (the source table)
   SELECT
     m."companyId" AS company_id,
     COALESCE(ced.site_id, m."companySiteId") AS site_id,
@@ -77,26 +74,11 @@ FROM (
   FROM public.legacy_site_mappings m
   LEFT JOIN ld_contract_ced ced
     ON ced.company_id = m."companyId"
+  WHERE LOWER(COALESCE(m.source, '')) LIKE '%retention%'
 
   UNION ALL
 
-  -- 2) Site stamped RETENTION on loadSourceId
-  SELECT
-    s."companyId" AS company_id,
-    COALESCE(ced.site_id, s.id) AS site_id,
-    COALESCE(src.name, 'Retention') AS source,
-    ced.end_date,
-    s."loadSourceAt" AS migrated_at
-  FROM public.company_sites s
-  JOIN public.crm_load_source src
-    ON src.id = s."loadSourceId"
-  LEFT JOIN ld_contract_ced ced
-    ON ced.company_id = s."companyId"
-  WHERE src.kind = 'RETENTION'
-
-  UNION ALL
-
-  -- 3) Keep until migration — any company with start+end on at least one meter
+  -- 2) Keep until migration — any company with start+end on at least one meter
   SELECT
     ced.company_id,
     ced.site_id,
