@@ -9,9 +9,10 @@
 # MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): E.ON deemed/flexible/variable
 # MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
 # MAGIC
-# MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings.source`
-# MAGIC (same table fallback uses for LIKE '%retention%'). Later supplier files can
-# MAGIC also stamp `company_sites.loadSourceId`. Scratch only — no CRM ALTER.
+# MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings`.
+# MAGIC Load origin is the **`campaign` column** (Retention / Supplier) — that is
+# MAGIC NOT the lead-tag Campaign pool (Retentions / Past Retentions / E.ON).
+# MAGIC Still match `LIKE '%retention%'` on `campaign` and `source` just in case.
 # MAGIC Deal or fallback with no CED = Nightly day 0 → Past Retention, not Unassigned.
 # MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
@@ -115,12 +116,19 @@ except Exception as e:
     )
     print("crm_company_load_sale skip", str(e)[:160])
 
-# Source table is legacy_site_mappings (not crm_load_source).
+# Load origin = legacy_site_mappings.campaign (Retention / Supplier).
+# Not the lead-tag Campaign pool. Column `source` still matched just in case.
 maps = jdbc_table("public.legacy_site_mappings")
+_map_cols = {c.lower(): c for c in maps.columns}
+if "campaign" not in _map_cols:
+    maps = maps.withColumn("campaign", F.lit(None).cast("string"))
 maps.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
     "crm_load.new_crm.snap_legacy_site_mappings"
 )
 print("legacy_site_mappings", maps.count(), maps.columns)
+if "campaign" in {c.lower() for c in maps.columns}:
+    print("mapping campaign (load origin, not pool Campaign)")
+    maps.groupBy([c for c in maps.columns if c.lower() == "campaign"][0]).count().show(30, False)
 
 spark.createDataFrame(
     [],
@@ -672,9 +680,12 @@ spark.table("crm_load.new_crm.snap_companies").where(
 # MAGIC   FROM (
 # MAGIC     SELECT
 # MAGIC       m.`companyId` AS company_id,
-# MAGIC       LOWER(COALESCE(m.source, '')) LIKE '%retention%' AS is_retention,
+# MAGIC       (
+# MAGIC         LOWER(COALESCE(m.`campaign`, '')) LIKE '%retention%'
+# MAGIC         OR LOWER(COALESCE(m.`source`, '')) LIKE '%retention%'
+# MAGIC       ) AS is_retention,
 # MAGIC       true AS has_mapping,
-# MAGIC       m.source AS mapping_source,
+# MAGIC       COALESCE(m.`campaign`, m.`source`) AS mapping_source,
 # MAGIC       CAST(NULL AS STRING) AS site_kind,
 # MAGIC       CAST(NULL AS STRING) AS site_family,
 # MAGIC       CAST(NULL AS STRING) AS site_source_id

@@ -8,11 +8,13 @@
 --   4) no CED on any meter → Past Retention
 --
 -- Who is inserted:
---   1) legacy_site_mappings — THIS is the source table (LIKE '%retention%')
+--   1) legacy_site_mappings — load origin is column "campaign"
+--      (Retention / Supplier). That is NOT the lead-tag Campaign pool.
+--      Still LIKE '%retention%' on campaign and source just in case.
 --   2) any meter with an endDate
 --   3) every public.companies row (this load is all retention)
 --
--- Do not use crm_load_source. Source is legacy_site_mappings.source.
+-- Do not use crm_load_source.
 -- Safe to re-run. Does not change poolId.
 
 BEGIN;
@@ -97,17 +99,22 @@ SELECT DISTINCT ON (u.company_id)
   u.end_date,
   CURRENT_TIMESTAMP
 FROM (
-  -- 1) Retention rows from legacy_site_mappings (the source table)
+  -- 1) Retention rows from legacy_site_mappings
+  --    campaign = load origin (Retention / Supplier), not pool Campaign
   SELECT
     m."companyId" AS company_id,
     COALESCE(ced.site_id, m."companySiteId") AS site_id,
-    COALESCE(m.source, 'Retention') AS source,
+    COALESCE(
+      NULLIF(BTRIM(m.campaign), ''),
+      NULLIF(BTRIM(m.source), ''),
+      'Retention'
+    ) AS source,
     ced.end_date,
     m."migratedAt" AS migrated_at
   FROM public.legacy_site_mappings m
   LEFT JOIN ld_contract_ced ced
     ON ced.company_id = m."companyId"
-  WHERE LOWER(COALESCE(m.source, '')) LIKE '%retention%'
+  WHERE LOWER(COALESCE(m.campaign, m.source, '')) LIKE '%retention%'
 
   UNION ALL
 
