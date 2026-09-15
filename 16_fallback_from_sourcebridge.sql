@@ -1,19 +1,20 @@
 -- Fallback: every retention-source lead → crm_company_load_sale
 --
 -- Tag reacts to this table (source), not to the supplier on the contract:
---   on fallback + any dated meter → clock from the SOONEST start+end
---     (Retention beats Upselling). Empty sister meter is ignored (not day 0).
+--   on fallback + dated meters → company clock:
+--     Retention (1–540 days) beats Past Retention beats Upselling.
+--     Empty sister meter is ignored (not day 0).
 --   on fallback + no CED on any meter → Past Retention (Nightly day 0)
 --   not on fallback → supplier rules (E.ON / BG / …)
 --
 -- Who is inserted:
 --   1) legacy_site_mappings — THIS is the source table (LIKE '%retention%')
---   2) any meter with startDate AND endDate (keep until migration is done)
+--   2) any meter with an endDate (join via siteId or siteMeterId)
+--   3) every public.companies row (this load is all retention)
 --
 -- Do not use crm_load_source. Source is legacy_site_mappings.source.
 --
--- CED: soonest dated meter only (start+end required). No two-site MIN-to-0.
--- contracts use siteId, not companySiteId.
+-- CED: soonest dated meter (endDate required). Joins siteId and siteMeterId.
 -- Safe to re-run. Does not change poolId.
 
 BEGIN;
@@ -42,17 +43,31 @@ SELECT DISTINCT ON (company_id)
   end_date
 FROM (
   SELECT
-    COALESCE(NULLIF(BTRIM(c."companyId"), ''), s."companyId") AS company_id,
-    COALESCE(c."siteId", s.id) AS site_id,
+    COALESCE(
+      NULLIF(BTRIM(c."companyId"), ''),
+      s."companyId",
+      s2."companyId"
+    ) AS company_id,
+    COALESCE(c."siteId", s.id, s2.id) AS site_id,
     c."endDate"::date AS end_date
   FROM public.contracts c
   LEFT JOIN public.company_sites s
     ON s.id = c."siteId"
-  WHERE c."startDate" IS NOT NULL
-    AND c."endDate" IS NOT NULL
+  LEFT JOIN public.site_meters sm
+    ON sm.id = c."siteMeterId"
+  LEFT JOIN public.company_sites s2
+    ON s2.id = sm."companySiteId"
+  WHERE c."endDate" IS NOT NULL
 ) x
 WHERE company_id IS NOT NULL
-ORDER BY company_id, end_date ASC NULLS LAST;
+ORDER BY
+  company_id,
+  CASE
+    WHEN end_date > CURRENT_DATE AND (end_date - CURRENT_DATE) <= 540 THEN 0
+    WHEN end_date <= CURRENT_DATE THEN 1
+    ELSE 2
+  END,
+  end_date ASC NULLS LAST;
 
 INSERT INTO public.crm_company_load_sale
   ("companyId", "companySiteId", source, "hasPastSale", "lastDealEndDate", "updatedAt")
@@ -78,7 +93,7 @@ FROM (
 
   UNION ALL
 
-  -- 2) Keep until migration — any company with start+end on at least one meter
+  -- 2) Keep until migration — any company with an endDate on at least one meter
   SELECT
     ced.company_id,
     ced.site_id,
@@ -86,11 +101,29 @@ FROM (
     ced.end_date,
     NULL::timestamp AS migrated_at
   FROM ld_contract_ced ced
+
+  UNION ALL
+
+  -- 3) This load is all retention — every company, even if mapping/CED did not join
+  SELECT
+    co.id AS company_id,
+    ced.site_id,
+    'Retention' AS source,
+    ced.end_date,
+    NULL::timestamp AS migrated_at
+  FROM public.companies co
+  LEFT JOIN ld_contract_ced ced
+    ON ced.company_id = co.id
 ) u
 WHERE u.company_id IS NOT NULL
 ORDER BY
   u.company_id,
   CASE WHEN u.end_date IS NOT NULL THEN 0 ELSE 1 END,
+  CASE
+    WHEN u.end_date > CURRENT_DATE AND (u.end_date - CURRENT_DATE) <= 540 THEN 0
+    WHEN u.end_date <= CURRENT_DATE THEN 1
+    ELSE 2
+  END,
   u.end_date ASC NULLS LAST,
   u.migrated_at DESC NULLS LAST
 ON CONFLICT ("companyId") DO UPDATE SET

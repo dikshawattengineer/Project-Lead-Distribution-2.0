@@ -394,7 +394,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC CREATE OR REPLACE TABLE crm_load.new_crm.ld_working AS
 # MAGIC WITH contracts_f AS (
 # MAGIC   SELECT
-# MAGIC     COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`) AS company_id,
+# MAGIC     COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`, s2.`companyId`) AS company_id,
 # MAGIC     c.`providerId`                        AS provider_id,
 # MAGIC     p.`displayName`                       AS provider_name,
 # MAGIC     c.`endDate`                           AS end_date,
@@ -423,9 +423,13 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   FROM crm_load.new_crm.snap_contracts c
 # MAGIC   LEFT JOIN crm_load.new_crm.snap_company_sites s
 # MAGIC     ON s.id = c.`siteId`
+# MAGIC   LEFT JOIN crm_load.new_crm.snap_site_meters sm
+# MAGIC     ON sm.id = c.`siteMeterId`
+# MAGIC   LEFT JOIN crm_load.new_crm.snap_company_sites s2
+# MAGIC     ON s2.id = sm.`companySiteId`
 # MAGIC   LEFT JOIN crm_load.new_crm.snap_providers p
 # MAGIC     ON c.`providerId` = p.id
-# MAGIC   WHERE COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`) IS NOT NULL
+# MAGIC   WHERE COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`, s2.`companyId`) IS NOT NULL
 # MAGIC ),
 # MAGIC winning AS (
 # MAGIC   SELECT *
@@ -441,6 +445,28 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       ) AS rn
 # MAGIC     FROM contracts_f
 # MAGIC   ) x
+# MAGIC   WHERE rn = 1
+# MAGIC ),
+# MAGIC retention_clock AS (
+# MAGIC   SELECT *
+# MAGIC   FROM (
+# MAGIC     SELECT
+# MAGIC       company_id,
+# MAGIC       end_date,
+# MAGIC       raw_days_left,
+# MAGIC       ROW_NUMBER() OVER (
+# MAGIC         PARTITION BY company_id
+# MAGIC         ORDER BY
+# MAGIC           CASE
+# MAGIC             WHEN raw_days_left BETWEEN 1 AND 540 THEN 0
+# MAGIC             WHEN raw_days_left IS NULL OR raw_days_left < 1 THEN 1
+# MAGIC             ELSE 2
+# MAGIC           END,
+# MAGIC           end_date ASC NULLS LAST
+# MAGIC       ) AS rn
+# MAGIC     FROM contracts_f
+# MAGIC     WHERE end_date IS NOT NULL
+# MAGIC   ) r
 # MAGIC   WHERE rn = 1
 # MAGIC ),
 # MAGIC sites AS (
@@ -543,10 +569,14 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   w.raw_days_left,
 # MAGIC   w.days_left,
 # MAGIC   COALESCE(
+# MAGIC     DATEDIFF(rc.end_date, CURRENT_DATE),
 # MAGIC     ld.last_deal_raw_days_left,
 # MAGIC     DATEDIFF(ls.last_deal_end_date, CURRENT_DATE)
 # MAGIC   ) AS last_deal_raw_days_left,
 # MAGIC   COALESCE(
+# MAGIC     CASE WHEN rc.end_date IS NOT NULL
+# MAGIC          THEN COALESCE(DATEDIFF(rc.end_date, CURRENT_DATE), 0)
+# MAGIC     END,
 # MAGIC     ld.last_deal_days_left,
 # MAGIC     CASE WHEN ls.last_deal_end_date IS NOT NULL
 # MAGIC          THEN COALESCE(DATEDIFF(ls.last_deal_end_date, CURRENT_DATE), 0)
@@ -559,7 +589,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC     ELSE false
 # MAGIC   END AS has_any_past_deal,
 # MAGIC   ls.has_past_sale                             AS hasPastSale,
-# MAGIC   ls.last_deal_end_date                        AS lastDealEndDate,
+# MAGIC   COALESCE(rc.end_date, ls.last_deal_end_date) AS lastDealEndDate,
 # MAGIC   ls.fallback_source,
 # MAGIC   CASE
 # MAGIC     WHEN src.source_kind IS NOT NULL THEN src.source_kind
@@ -589,6 +619,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC LEFT JOIN crm_load.new_crm.snap_deal_companies d ON co.id = d.company_id
 # MAGIC LEFT JOIN last_deals ld ON co.id = ld.company_id
 # MAGIC LEFT JOIN load_sale ls ON co.id = ls.company_id
+# MAGIC LEFT JOIN retention_clock rc ON co.id = rc.company_id
 # MAGIC LEFT JOIN load_src src ON co.id = src.company_id
 # MAGIC LEFT JOIN complaint_notes cn ON co.id = cn.company_id
 # MAGIC LEFT JOIN complaint_xfer xf ON co.id = xf.company_id
