@@ -12,6 +12,7 @@
 # MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings.source`
 # MAGIC (same table fallback uses for LIKE '%retention%'). Later supplier files can
 # MAGIC also stamp `company_sites.loadSourceId`. Scratch only — no CRM ALTER.
+# MAGIC Deal or fallback with no CED = Nightly day 0 → Past Retention, not Unassigned.
 # MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
 # MAGIC Tag → CAMPAIGN / STANDARD parent. If that parent has active `pool_links`,
@@ -447,6 +448,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       ROW_NUMBER() OVER (
 # MAGIC         PARTITION BY company_id
 # MAGIC         ORDER BY
+# MAGIC           CASE WHEN raw_days_left IS NULL THEN 1 ELSE 0 END,
 # MAGIC           days_left ASC,
 # MAGIC           CASE family WHEN 'EON' THEN 1 WHEN 'BG' THEN 2 WHEN 'UB' THEN 3 ELSE 4 END
 # MAGIC       ) AS rn
@@ -662,8 +664,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       THEN 'CUSTOMER_CARE'
 # MAGIC     WHEN has_any_past_deal AND NOT COALESCE(has_rejected_deal, false) THEN
 # MAGIC       CASE
-# MAGIC         WHEN last_deal_raw_days_left IS NULL THEN 'UNASSIGNED'
-# MAGIC         WHEN last_deal_days_left < 1 THEN 'PAST_RETENTION'
+# MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN 'PAST_RETENTION'
 # MAGIC         WHEN last_deal_days_left <= 540 THEN 'RETENTION'
 # MAGIC         ELSE 'UPSELLING'
 # MAGIC       END

@@ -1,9 +1,10 @@
 -- Fallback: every retention-source lead → crm_company_load_sale
 --
 -- Tag reacts to this table (source), not to the supplier on the contract:
---   on fallback + CED     → Past Retention / Retention / Upselling
---   on fallback + no CED  → Unassigned
---   not on fallback       → supplier rules (E.ON / BG / …)
+--   on fallback + any dated meter → clock from the SOONEST start+end
+--     (Retention beats Upselling). Empty sister meter is ignored (not day 0).
+--   on fallback + no CED on any meter → Past Retention (Nightly day 0)
+--   not on fallback → supplier rules (E.ON / BG / …)
 --
 -- Who is inserted:
 --   1) legacy_site_mappings — this is the source table (LIKE '%retention%')
@@ -14,7 +15,7 @@
 -- (crm_load_source.kind = SUPPLIER). Do NOT insert those into this table.
 -- ld_working.source_kind will read that stamp so tag uses supplier rules.
 --
--- CED from the meter that has dates (gas dated + elec empty still counts).
+-- CED: soonest dated meter only (start+end required). No two-site MIN-to-0.
 -- contracts use siteId, not companySiteId.
 -- Safe to re-run. Does not change poolId.
 
@@ -54,7 +55,7 @@ FROM (
     AND c."endDate" IS NOT NULL
 ) x
 WHERE company_id IS NOT NULL
-ORDER BY company_id, end_date DESC NULLS LAST;
+ORDER BY company_id, end_date ASC NULLS LAST;
 
 INSERT INTO public.crm_company_load_sale
   ("companyId", "companySiteId", source, "hasPastSale", "lastDealEndDate", "updatedAt")
@@ -108,6 +109,7 @@ WHERE u.company_id IS NOT NULL
 ORDER BY
   u.company_id,
   CASE WHEN u.end_date IS NOT NULL THEN 0 ELSE 1 END,
+  u.end_date ASC NULLS LAST,
   u.migrated_at DESC NULLS LAST
 ON CONFLICT ("companyId") DO UPDATE SET
   "companySiteId" = COALESCE(EXCLUDED."companySiteId", crm_company_load_sale."companySiteId"),
