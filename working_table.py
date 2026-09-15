@@ -394,7 +394,7 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC CREATE OR REPLACE TABLE crm_load.new_crm.ld_working AS
 # MAGIC WITH contracts_f AS (
 # MAGIC   SELECT
-# MAGIC     c.`companyId`                         AS company_id,
+# MAGIC     COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`) AS company_id,
 # MAGIC     c.`providerId`                        AS provider_id,
 # MAGIC     p.`displayName`                       AS provider_name,
 # MAGIC     c.`endDate`                           AS end_date,
@@ -421,8 +421,11 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       ELSE 'OTHER'
 # MAGIC     END AS family
 # MAGIC   FROM crm_load.new_crm.snap_contracts c
+# MAGIC   LEFT JOIN crm_load.new_crm.snap_company_sites s
+# MAGIC     ON s.id = c.`siteId`
 # MAGIC   LEFT JOIN crm_load.new_crm.snap_providers p
 # MAGIC     ON c.`providerId` = p.id
+# MAGIC   WHERE COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`) IS NOT NULL
 # MAGIC ),
 # MAGIC winning AS (
 # MAGIC   SELECT *
