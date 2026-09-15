@@ -1,5 +1,6 @@
--- Fill lastDealEndDate from the LATEST contract endDate on the company
--- (all sites / meters). Empty sister meter is ignored (not day 0).
+-- Fill lastDealEndDate from all sites/meters: Retention (1–540) first,
+-- then Past, then Upselling; latest date inside that bag.
+-- Empty sister meter is ignored (not day 0).
 -- Run after 16 if you need a second pass. Safe to re-run. Does not change poolId.
 
 UPDATE public.crm_company_load_sale sl
@@ -31,6 +32,13 @@ FROM (
     WHERE c."endDate" IS NOT NULL
   ) d
   WHERE company_id IS NOT NULL
-  ORDER BY company_id, end_date DESC NULLS LAST
+  ORDER BY
+    company_id,
+    CASE
+      WHEN end_date > CURRENT_DATE AND (end_date - CURRENT_DATE) <= 540 THEN 0
+      WHEN end_date <= CURRENT_DATE THEN 1
+      ELSE 2
+    END,
+    end_date DESC NULLS LAST
 ) x
 WHERE sl."companyId" = x.company_id;

@@ -448,10 +448,25 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   WHERE rn = 1
 # MAGIC ),
 # MAGIC latest_ced AS (
-# MAGIC   SELECT company_id, MAX(end_date) AS end_date
-# MAGIC   FROM contracts_f
-# MAGIC   WHERE end_date IS NOT NULL
-# MAGIC   GROUP BY company_id
+# MAGIC   SELECT *
+# MAGIC   FROM (
+# MAGIC     SELECT
+# MAGIC       company_id,
+# MAGIC       end_date,
+# MAGIC       ROW_NUMBER() OVER (
+# MAGIC         PARTITION BY company_id
+# MAGIC         ORDER BY
+# MAGIC           CASE
+# MAGIC             WHEN raw_days_left BETWEEN 1 AND 540 THEN 0
+# MAGIC             WHEN raw_days_left IS NULL OR raw_days_left < 1 THEN 1
+# MAGIC             ELSE 2
+# MAGIC           END,
+# MAGIC           end_date DESC NULLS LAST
+# MAGIC       ) AS rn
+# MAGIC     FROM contracts_f
+# MAGIC     WHERE end_date IS NOT NULL
+# MAGIC   ) r
+# MAGIC   WHERE rn = 1
 # MAGIC ),
 # MAGIC sites AS (
 # MAGIC   SELECT `companyId` AS company_id, COUNT(*) AS site_count

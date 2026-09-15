@@ -1,13 +1,11 @@
 -- Fallback: every retention-source lead → crm_company_load_sale
 --
--- Tag buckets (same as CRM Nightly):
---   Past Retention: CED today or past, or no CED (< 1 day)
---   Retention:      1–540 days left
---   Upselling:      541+ days left
---
--- Which CED: the LATEST contract endDate on the company
--- (all sites / meters, via siteId or siteMeterId). Empty meters ignored.
--- That is why a live 197/333-day meter beats an expired sister site.
+-- Looks at every site / meter on the company (empty meters ignored).
+-- Retention always wins over Past Retention and Upselling:
+--   1) any CED 1–540 days  → Retention  (latest of those dates)
+--   2) else any CED past/today → Past Retention
+--   3) else CED 541+       → Upselling
+--   4) no CED on any meter → Past Retention
 --
 -- Who is inserted:
 --   1) legacy_site_mappings — THIS is the source table (LIKE '%retention%')
@@ -60,7 +58,14 @@ FROM (
   WHERE c."endDate" IS NOT NULL
 ) x
 WHERE company_id IS NOT NULL
-ORDER BY company_id, end_date DESC NULLS LAST;
+ORDER BY
+  company_id,
+  CASE
+    WHEN end_date > CURRENT_DATE AND (end_date - CURRENT_DATE) <= 540 THEN 0
+    WHEN end_date <= CURRENT_DATE THEN 1
+    ELSE 2
+  END,
+  end_date DESC NULLS LAST;
 
 INSERT INTO public.crm_company_load_sale
   ("companyId", "companySiteId", source, "hasPastSale", "lastDealEndDate", "updatedAt")
@@ -112,6 +117,11 @@ WHERE u.company_id IS NOT NULL
 ORDER BY
   u.company_id,
   CASE WHEN u.end_date IS NOT NULL THEN 0 ELSE 1 END,
+  CASE
+    WHEN u.end_date > CURRENT_DATE AND (u.end_date - CURRENT_DATE) <= 540 THEN 0
+    WHEN u.end_date <= CURRENT_DATE THEN 1
+    ELSE 2
+  END,
   u.end_date DESC NULLS LAST,
   u.migrated_at DESC NULLS LAST
 ON CONFLICT ("companyId") DO UPDATE SET
