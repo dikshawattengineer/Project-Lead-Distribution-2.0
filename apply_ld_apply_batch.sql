@@ -198,6 +198,27 @@ BEGIN
   )
   SELECT COUNT(*) INTO n FROM audited;
 
+  -- Same agent bag (Kelly on both Retention + Past Retention) does not move
+  -- poolId, so Campaign stayed on the old parent. Restamp sourcePoolId always.
+  UPDATE public.company_pool_placements pl
+  SET "sourcePoolId" = x.proposed_campaign_id
+  FROM (
+    SELECT
+      b.company_id,
+      COALESCE(
+        NULLIF(b.proposed_campaign_id, ''),
+        CASE WHEN p.type::text IN ('STANDARD', 'CAMPAIGN') THEN b.proposed_pool_id END
+      ) AS proposed_campaign_id
+    FROM public.ld_apply_batch b
+    JOIN public.pools p ON p.id = b.proposed_pool_id
+  ) x
+  WHERE pl."companyId" = x.company_id
+    AND pl."endedAt" IS NULL
+    AND x.proposed_campaign_id IS NOT NULL
+    AND pl."sourcePoolId" IS DISTINCT FROM x.proposed_campaign_id;
+
+  PERFORM public.ld_seed_campaigns();
+
   IF has_campaign THEN
     UPDATE public.companies c
     SET

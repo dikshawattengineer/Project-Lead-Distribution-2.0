@@ -869,8 +869,9 @@ print("crm_pool_rule", _rules.count())
 # MAGIC Reads `pool_links`. Parent with no children stays shared.
 # MAGIC Already on a valid child → keep. Sticky → not moved.
 # MAGIC New / on-parent companies → equal split across linked children.
-# MAGIC `parent_pool_id` is the campaign (Retention / Past Retention / E.ON / …)
-# MAGIC and is not changed when the lead moves into a PRIVATE child.
+# MAGIC `parent_pool_id` is the campaign (Retention / Past Retention / E.ON / …).
+# MAGIC Apply must restamp `sourcePoolId` even when the agent bag stays the same
+# MAGIC (Kelly is a child of both Retentions and Past Retentions).
 
 # COMMAND ----------
 
