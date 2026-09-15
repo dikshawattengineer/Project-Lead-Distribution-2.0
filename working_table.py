@@ -599,7 +599,24 @@ spark.table("crm_load.new_crm.snap_companies").where(
 # MAGIC ),
 # MAGIC latest_ced AS (
 # MAGIC   SELECT company_id, end_date
-# MAGIC   FROM crm_load.new_crm.ld_company_ced
+# MAGIC   FROM (
+# MAGIC     SELECT
+# MAGIC       company_id,
+# MAGIC       end_date,
+# MAGIC       ROW_NUMBER() OVER (
+# MAGIC         PARTITION BY company_id
+# MAGIC         ORDER BY
+# MAGIC           CASE
+# MAGIC             WHEN raw_days_left BETWEEN 1 AND 540 THEN 0
+# MAGIC             WHEN raw_days_left IS NULL OR raw_days_left < 1 THEN 1
+# MAGIC             ELSE 2
+# MAGIC           END,
+# MAGIC           end_date DESC NULLS LAST
+# MAGIC       ) AS rn
+# MAGIC     FROM contracts_f
+# MAGIC     WHERE end_date IS NOT NULL
+# MAGIC   ) r
+# MAGIC   WHERE rn = 1
 # MAGIC ),
 # MAGIC sites AS (
 # MAGIC   SELECT `companyId` AS company_id, COUNT(*) AS site_count
@@ -883,6 +900,21 @@ spark.table("crm_load.new_crm.snap_companies").where(
 # MAGIC FROM crm_load.new_crm.ld_working
 # MAGIC GROUP BY lead_tag, is_win_dfv, is_protected
 # MAGIC ORDER BY companies DESC
+# MAGIC ;
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT
+# MAGIC   co.name,
+# MAGIC   w.lead_tag,
+# MAGIC   w.lastDealEndDate,
+# MAGIC   w.last_deal_days_left
+# MAGIC FROM crm_load.new_crm.ld_working w
+# MAGIC JOIN crm_load.new_crm.snap_companies co
+# MAGIC   ON co.id = w.company_id
+# MAGIC WHERE LOWER(co.name) LIKE '%duthus%'
+# MAGIC    OR LOWER(co.name) LIKE '%beeby%'
 # MAGIC ;
 
 # COMMAND ----------
