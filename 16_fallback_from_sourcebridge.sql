@@ -40,22 +40,42 @@ SELECT DISTINCT ON (company_id)
   site_id,
   end_date
 FROM (
+  -- companyId on the contract
   SELECT
-    COALESCE(
-      NULLIF(BTRIM(c."companyId"), ''),
-      s."companyId",
-      s2."companyId"
-    ) AS company_id,
-    COALESCE(c."siteId", s.id, s2.id) AS site_id,
+    NULLIF(BTRIM(c."companyId"), '') AS company_id,
+    c."siteId" AS site_id,
     c."endDate"::date AS end_date
   FROM public.contracts c
-  LEFT JOIN public.company_sites s
-    ON s.id = c."siteId"
-  LEFT JOIN public.site_meters sm
-    ON sm.id = c."siteMeterId"
-  LEFT JOIN public.company_sites s2
-    ON s2.id = sm."companySiteId"
   WHERE c."endDate" IS NOT NULL
+    AND NULLIF(BTRIM(c."companyId"), '') IS NOT NULL
+
+  UNION ALL
+
+  -- siteId → company_sites
+  SELECT
+    s."companyId" AS company_id,
+    s.id AS site_id,
+    c."endDate"::date AS end_date
+  FROM public.contracts c
+  JOIN public.company_sites s
+    ON s.id = c."siteId"
+  WHERE c."endDate" IS NOT NULL
+    AND s."companyId" IS NOT NULL
+
+  UNION ALL
+
+  -- siteMeterId → site_meters → company_sites (current meter contracts)
+  SELECT
+    s."companyId" AS company_id,
+    s.id AS site_id,
+    c."endDate"::date AS end_date
+  FROM public.contracts c
+  JOIN public.site_meters sm
+    ON sm.id = c."siteMeterId"
+  JOIN public.company_sites s
+    ON s.id = sm."companySiteId"
+  WHERE c."endDate" IS NOT NULL
+    AND s."companyId" IS NOT NULL
 ) x
 WHERE company_id IS NOT NULL
 ORDER BY

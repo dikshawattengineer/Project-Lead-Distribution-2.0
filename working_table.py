@@ -392,14 +392,33 @@ print("exclusively de-energised companies", dead.count())
 # DBTITLE 1,ld_working
 # MAGIC %sql
 # MAGIC CREATE OR REPLACE TABLE crm_load.new_crm.ld_working AS
-# MAGIC WITH contracts_f AS (
+# MAGIC WITH contract_cos AS (
+# MAGIC   SELECT c.id AS contract_id, NULLIF(TRIM(c.`companyId`), '') AS company_id
+# MAGIC   FROM crm_load.new_crm.snap_contracts c
+# MAGIC   WHERE NULLIF(TRIM(c.`companyId`), '') IS NOT NULL
+# MAGIC   UNION
+# MAGIC   SELECT c.id, s.`companyId`
+# MAGIC   FROM crm_load.new_crm.snap_contracts c
+# MAGIC   JOIN crm_load.new_crm.snap_company_sites s
+# MAGIC     ON s.id = c.`siteId`
+# MAGIC   WHERE s.`companyId` IS NOT NULL
+# MAGIC   UNION
+# MAGIC   SELECT c.id, s.`companyId`
+# MAGIC   FROM crm_load.new_crm.snap_contracts c
+# MAGIC   JOIN crm_load.new_crm.snap_site_meters sm
+# MAGIC     ON sm.id = c.`siteMeterId`
+# MAGIC   JOIN crm_load.new_crm.snap_company_sites s
+# MAGIC     ON s.id = sm.`companySiteId`
+# MAGIC   WHERE s.`companyId` IS NOT NULL
+# MAGIC ),
+# MAGIC contracts_f AS (
 # MAGIC   SELECT
-# MAGIC     COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`, s2.`companyId`) AS company_id,
+# MAGIC     cc.company_id,
 # MAGIC     c.`providerId`                        AS provider_id,
 # MAGIC     p.`displayName`                       AS provider_name,
-# MAGIC     c.`endDate`                           AS end_date,
-# MAGIC     DATEDIFF(c.`endDate`, CURRENT_DATE)   AS raw_days_left,
-# MAGIC     COALESCE(DATEDIFF(c.`endDate`, CURRENT_DATE), 0) AS days_left,
+# MAGIC     CAST(c.`endDate` AS DATE)             AS end_date,
+# MAGIC     DATEDIFF(CAST(c.`endDate` AS DATE), CURRENT_DATE) AS raw_days_left,
+# MAGIC     COALESCE(DATEDIFF(CAST(c.`endDate` AS DATE), CURRENT_DATE), 0) AS days_left,
 # MAGIC     UPPER(c.`utilityType`)                AS utility_type,
 # MAGIC     CAST(c.`type` AS STRING)              AS contract_type,
 # MAGIC     CASE
@@ -420,16 +439,12 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC       WHEN LOWER(p.`displayName`) LIKE '%utility bidder%'   THEN 'UB'
 # MAGIC       ELSE 'OTHER'
 # MAGIC     END AS family
-# MAGIC   FROM crm_load.new_crm.snap_contracts c
-# MAGIC   LEFT JOIN crm_load.new_crm.snap_company_sites s
-# MAGIC     ON s.id = c.`siteId`
-# MAGIC   LEFT JOIN crm_load.new_crm.snap_site_meters sm
-# MAGIC     ON sm.id = c.`siteMeterId`
-# MAGIC   LEFT JOIN crm_load.new_crm.snap_company_sites s2
-# MAGIC     ON s2.id = sm.`companySiteId`
+# MAGIC   FROM contract_cos cc
+# MAGIC   JOIN crm_load.new_crm.snap_contracts c
+# MAGIC     ON c.id = cc.contract_id
 # MAGIC   LEFT JOIN crm_load.new_crm.snap_providers p
 # MAGIC     ON c.`providerId` = p.id
-# MAGIC   WHERE COALESCE(NULLIF(c.`companyId`, ''), s.`companyId`, s2.`companyId`) IS NOT NULL
+# MAGIC   WHERE cc.company_id IS NOT NULL
 # MAGIC ),
 # MAGIC winning AS (
 # MAGIC   SELECT *
@@ -569,14 +584,12 @@ print("exclusively de-energised companies", dead.count())
 # MAGIC   w.days_left,
 # MAGIC   COALESCE(
 # MAGIC     DATEDIFF(lc.end_date, CURRENT_DATE),
-# MAGIC     ld.last_deal_raw_days_left,
 # MAGIC     DATEDIFF(ls.last_deal_end_date, CURRENT_DATE)
 # MAGIC   ) AS last_deal_raw_days_left,
 # MAGIC   COALESCE(
 # MAGIC     CASE WHEN lc.end_date IS NOT NULL
 # MAGIC          THEN COALESCE(DATEDIFF(lc.end_date, CURRENT_DATE), 0)
 # MAGIC     END,
-# MAGIC     ld.last_deal_days_left,
 # MAGIC     CASE WHEN ls.last_deal_end_date IS NOT NULL
 # MAGIC          THEN COALESCE(DATEDIFF(ls.last_deal_end_date, CURRENT_DATE), 0)
 # MAGIC     END
