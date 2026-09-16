@@ -1155,9 +1155,12 @@ shared_moves = spark.sql(
       proposed_pool_id,
       parent_pool_id AS proposed_campaign_id
     FROM crm_load.new_crm.ld_working
-    WHERE COALESCE(is_protected, false) = false
-      AND proposed_pool_id IS NOT NULL
+    WHERE proposed_pool_id IS NOT NULL
       AND parent_pool_id IS NOT NULL
+      AND (
+        COALESCE(is_protected, false) = false
+        OR lead_tag IN ('COMPLAINT', 'CALLBACK')
+      )
     """
 )
 _write_apply_batch(shared_moves, "pool + campaign rows (parent or linked child)")
