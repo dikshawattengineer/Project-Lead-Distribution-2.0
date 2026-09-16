@@ -17,7 +17,8 @@
 # MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
 # MAGIC Tag → CAMPAIGN / STANDARD parent. If that parent has active `pool_links`,
-# MAGIC fair-share non-sticky companies onto those PRIVATE children.
+# MAGIC fair-share non-sticky companies onto those PRIVATE children (Nightly
+# MAGIC average: new leads fill the shorter bag first).
 
 # COMMAND ----------
 
@@ -992,7 +993,9 @@ print("crm_pool_rule", _rules.count())
 # MAGIC
 # MAGIC Reads `pool_links`. Parent with no children stays shared.
 # MAGIC Already on a valid child → keep. Sticky → not moved.
-# MAGIC New / on-parent companies → equal split across linked children.
+# MAGIC New / on-parent companies → Nightly average: each new lead goes to the
+# MAGIC linked child with the fewest kept companies for that parent (Kelly gets
+# MAGIC the next few if she is short). Does not reclaim from the larger bag.
 # MAGIC `parent_pool_id` is the campaign (Retention / Past Retention / E.ON / …).
 # MAGIC Apply must restamp `sourcePoolId` even when the agent bag stays the same
 # MAGIC (Kelly is a child of both Retentions and Past Retentions).
@@ -1029,15 +1032,14 @@ display(_links)
 # MAGIC     AND CAST(`childType` AS STRING) = 'PRIVATE'
 # MAGIC ),
 # MAGIC members AS (
-# MAGIC   SELECT
-# MAGIC     parent_pool_id,
-# MAGIC     child_pool_id,
-# MAGIC     ROW_NUMBER() OVER (PARTITION BY parent_pool_id ORDER BY child_pool_id) AS member_rn,
-# MAGIC     COUNT(*) OVER (PARTITION BY parent_pool_id) AS member_cnt
+# MAGIC   SELECT parent_pool_id, child_pool_id
 # MAGIC   FROM links
 # MAGIC ),
 # MAGIC keep AS (
-# MAGIC   SELECT w.company_id, w.current_pool_id AS child_id
+# MAGIC   SELECT
+# MAGIC     w.company_id,
+# MAGIC     w.current_pool_id AS child_id,
+# MAGIC     w.proposed_pool_id AS parent_pool_id
 # MAGIC   FROM ld_before_split w
 # MAGIC   INNER JOIN links l
 # MAGIC     ON l.parent_pool_id = w.proposed_pool_id
@@ -1056,12 +1058,50 @@ display(_links)
 # MAGIC     )
 # MAGIC     AND NOT EXISTS (SELECT 1 FROM keep k WHERE k.company_id = w.company_id)
 # MAGIC ),
+# MAGIC bag AS (
+# MAGIC   SELECT
+# MAGIC     m.parent_pool_id,
+# MAGIC     m.child_pool_id,
+# MAGIC     COUNT(k.company_id) AS have_n
+# MAGIC   FROM members m
+# MAGIC   LEFT JOIN keep k
+# MAGIC     ON k.parent_pool_id = m.parent_pool_id
+# MAGIC    AND k.child_id = m.child_pool_id
+# MAGIC   GROUP BY m.parent_pool_id, m.child_pool_id
+# MAGIC ),
+# MAGIC parent_need AS (
+# MAGIC   SELECT parent_pool_id, COUNT(*) AS need_n
+# MAGIC   FROM need
+# MAGIC   GROUP BY parent_pool_id
+# MAGIC ),
+# MAGIC slots AS (
+# MAGIC   SELECT
+# MAGIC     b.parent_pool_id,
+# MAGIC     b.child_pool_id,
+# MAGIC     b.have_n,
+# MAGIC     pe.slot_i
+# MAGIC   FROM bag b
+# MAGIC   INNER JOIN parent_need p
+# MAGIC     ON p.parent_pool_id = b.parent_pool_id
+# MAGIC    AND p.need_n > 0
+# MAGIC   LATERAL VIEW EXPLODE(sequence(1, p.need_n)) pe AS slot_i
+# MAGIC ),
+# MAGIC ranked_slots AS (
+# MAGIC   SELECT
+# MAGIC     parent_pool_id,
+# MAGIC     child_pool_id,
+# MAGIC     ROW_NUMBER() OVER (
+# MAGIC       PARTITION BY parent_pool_id
+# MAGIC       ORDER BY have_n + slot_i, child_pool_id, slot_i
+# MAGIC     ) AS fill_rn
+# MAGIC   FROM slots
+# MAGIC ),
 # MAGIC assigned AS (
-# MAGIC   SELECT n.company_id, m.child_pool_id
+# MAGIC   SELECT n.company_id, r.child_pool_id
 # MAGIC   FROM need n
-# MAGIC   INNER JOIN members m
-# MAGIC     ON m.parent_pool_id = n.parent_pool_id
-# MAGIC    AND m.member_rn = ((n.cand_rn - 1) % m.member_cnt) + 1
+# MAGIC   INNER JOIN ranked_slots r
+# MAGIC     ON r.parent_pool_id = n.parent_pool_id
+# MAGIC    AND r.fill_rn = n.cand_rn
 # MAGIC )
 # MAGIC SELECT
 # MAGIC   w.company_id,
