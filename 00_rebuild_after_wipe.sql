@@ -2,11 +2,8 @@
 -- Prisma/CRM tables (companies, pools, profiles, contracts, …) come from
 -- the boss / app migrate first. Then run these files IN ORDER in Supabase:
 --
---   1) 01_schema_and_seeds.sql          crm_provider_family, crm_pool_rule
---   2) 09_sync_provider_pools.sql       providers → pools + tag rules + family map
---   3) 04_seed_supplier_shared_pools.sql  shared ld_pool_* (type STANDARD) + tag rules
---      (includes Retention, Upselling, Customer Care, Corporate)
---      OR seed_dfv_pools.sql for E.ON DFV = contract type only
+--   1) 04_seed_ld_pools.sql             core pools (UUID id, code key) + tag rules
+--   2) 09_sync_provider_pools.sql       providers → per-supplier pools + family map
 --   4) 02_split_schema.sql              policy / member / filter (unused while
 --      apply stops at STANDARD shared pools)
 --   5) apply_ld_apply_batch.sql         ld_apply_batch + ld_apply_batch_run()
@@ -37,9 +34,8 @@
 --   ld_apply_batch
 --   ld_apply_batch_run()
 --   ld_janitor_run()
--- Shared pool ROWS in pools (type STANDARD): ld_pool_eon, ld_pool_eon_dfv,
---   ld_pool_bg, ld_pool_ub, ld_pool_other, ld_pool_complaint,
---   ld_pool_unassigned, ld_pool_retention, ld_pool_retention_ooc,
---   ld_pool_upselling, ld_pool_customer_care, ld_pool_corporate
+-- Shared pool codes in pools: EON, EON_DFV, BG, UB, OTHER, UNASSIGNED,
+--   COMPLAINT, RETENTION, PAST_RETENTION, UPSELLING, CUSTOMER_CARE, CORPORATE
+--   (+ per-supplier codes from 09). pools.id = UUID v4.
 
-SELECT 'See comments: run 01 → 09_sync_provider_pools → 04/seed_dfv → apply → 24' AS rebuild_order;
+SELECT 'See comments: run 04 → 09 → apply → 24' AS rebuild_order;

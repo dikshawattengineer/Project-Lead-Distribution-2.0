@@ -22,7 +22,10 @@ DO $$
 BEGIN
   UPDATE public.pools
   SET type = 'CAMPAIGN'::pool_type, "updatedAt" = CURRENT_TIMESTAMP
-  WHERE id LIKE 'ld_pool_%'
+  WHERE EXISTS (
+      SELECT 1 FROM public.crm_pool_rule r
+      WHERE r."poolId" = pools.id AND COALESCE(r."isActive", true) = true
+    )
     AND type::text <> 'PRIVATE';
 
   UPDATE public.pool_links
@@ -82,7 +85,10 @@ BEGIN
       CURRENT_TIMESTAMP,
       CURRENT_TIMESTAMP
     FROM public.pools p
-    WHERE p.id LIKE 'ld_pool_%'
+    WHERE EXISTS (
+        SELECT 1 FROM public.crm_pool_rule r
+        WHERE r."poolId" = p.id AND COALESCE(r."isActive", true) = true
+      )
       AND p.type::text IN ('STANDARD', 'CAMPAIGN')
     ON CONFLICT (id) DO UPDATE
     SET

@@ -1,24 +1,9 @@
--- Sync every providers row → routing map + pool + NOW/IN_WINDOW rules.
---
--- Buckets (not one pool per BG/EON name):
---   British Gas Lite     → own pool (displayName), window 365
---   Other British Gas*   → ld_pool_bg "British Gas", window 548
---   E.ON / E-ON / EON*   → ld_pool_eon "E.ON", window 365
---   Utility Bidder       → ld_pool_ub, window 365
---   Every other known    → own pool, name = providers.displayName, window 365
---   Unknown / no provider → OTHER (ld_pool_other) — notebook only
---
--- E.ON DFV pool/rule is contract-type only (seed_dfv_pools / this file).
--- Past due EON_NOW → main E.ON (not DFV).
---
--- Safe to re-run. Does not change companies.poolId.
--- Run after base shared pools exist (04 / seed). Requires public.providers.
+-- Sync every providers row → routing map + pool (UUID) + NOW/IN_WINDOW rules.
+-- pools.id = gen_random_uuid(); pools.code = stable key (BG, YU_ENERGY, …).
+-- Run after 04_seed_ld_pools.sql. Safe to re-run. Does not change companies.poolId.
 
 BEGIN;
 
--- ---------------------------------------------------------------------------
--- Schema: routing map (extends old BG/EON/UB/OTHER family)
--- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.crm_provider_family (
   "providerId"   text PRIMARY KEY
     REFERENCES public.providers(id),
@@ -46,7 +31,6 @@ ALTER TABLE public.crm_provider_family
 ALTER TABLE public.crm_provider_family
   ADD COLUMN IF NOT EXISTS "matchedPattern" text;
 
--- Old CHECK only allowed BG/EON/UB/OTHER — drop so per-supplier codes work
 DO $$
 DECLARE
   cname text;
@@ -64,87 +48,14 @@ BEGIN
   END IF;
 END $$;
 
--- Priority need not be unique once every supplier has its own tags
-DROP INDEX IF EXISTS public.crm_pool_rule_priority_uidx;
-CREATE INDEX IF NOT EXISTS crm_pool_rule_priority_idx
-  ON public.crm_pool_rule (priority);
-
--- ---------------------------------------------------------------------------
--- Ensure core bags exist (idempotent)
--- ---------------------------------------------------------------------------
-INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
-VALUES
-  ('ld_pool_eon',       'EON',     'E.ON',            'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_eon_dfv',   'EON_DFV', 'E.ON DFV',        'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_bg',        'BG',      'British Gas',     'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_ub',        'UB',      'Utility Bidder',  'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_other',     'OTHER',   'Other',           'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_unassigned','UNASSIGNED','Unassigned',    'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-ON CONFLICT (id) DO UPDATE SET
-  code = EXCLUDED.code,
-  name = EXCLUDED.name,
-  "updatedAt" = CURRENT_TIMESTAMP;
-
--- E.ON DFV = real DFV only. Past due → main E.ON.
-INSERT INTO public.crm_pool_rule
-  (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
-VALUES
-  (
-    'ld_rule_eon_dfv', 28, 'EON_DFV', 'ld_pool_eon_dfv', true,
-    'E.ON deemed / flexible / variable only', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_eon_now', 29, 'EON_NOW', 'ld_pool_eon', true,
-    'E.ON expired / no CED → main E.ON', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_eon_in', 30, 'EON_IN_WINDOW', 'ld_pool_eon', true,
-    'E.ON in window 1–365', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_bg_now', 39, 'BG_NOW', 'ld_pool_bg', true,
-    'British Gas expired / no CED', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_bg_in', 40, 'BG_IN_WINDOW', 'ld_pool_bg', true,
-    'British Gas in window 1–548', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_ub_now', 20, 'UB_NOW', 'ld_pool_ub', true,
-    'Utility Bidder expired / no CED', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_ub_in', 21, 'UB_IN_WINDOW', 'ld_pool_ub', true,
-    'Utility Bidder in window 1–365', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_other_now', 49, 'OTHER_NOW', 'ld_pool_other', true,
-    'Unknown supplier expired / no CED', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_other_in', 50, 'OTHER_IN_WINDOW', 'ld_pool_other', true,
-    'Unknown supplier in window', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_pre', 90, 'PRE_WINDOW', 'ld_pool_unassigned', true,
-    'Wait — too far out', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  ),
-  (
-    'ld_rule_fallback', 99, 'UNASSIGNED', 'ld_pool_unassigned', true,
-    'Fallback', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-  )
-ON CONFLICT (id) DO UPDATE SET
-  priority = EXCLUDED.priority,
-  tag = EXCLUDED.tag,
-  "poolId" = EXCLUDED."poolId",
-  "isActive" = EXCLUDED."isActive",
-  description = EXCLUDED.description,
-  "updatedAt" = CURRENT_TIMESTAMP;
+CREATE UNIQUE INDEX IF NOT EXISTS pools_code_uidx
+  ON public.pools (code)
+  WHERE code IS NOT NULL;
 
 COMMIT;
 
 -- ---------------------------------------------------------------------------
--- Classify every provider → tagCode / pool / window
+-- Classify every provider → tagCode / pool_code / window (one session, no BEGIN)
 -- ---------------------------------------------------------------------------
 CREATE TEMP TABLE ld_provider_route ON COMMIT DROP AS
 WITH base AS (
@@ -224,7 +135,6 @@ coded AS (
     END AS pool_name
   FROM slugged
 ),
--- Same slug from two suppliers → disambiguate (not for shared BG/EON/UB)
 dedup AS (
   SELECT
     c.*,
@@ -245,11 +155,13 @@ final AS (
     window_days,
     pool_name,
     CASE bucket
-      WHEN 'BG' THEN 'ld_pool_bg'
-      WHEN 'EON' THEN 'ld_pool_eon'
-      WHEN 'UB' THEN 'ld_pool_ub'
-      ELSE NULL
-    END AS shared_pool_id
+      WHEN 'BG' THEN 'BG'
+      WHEN 'EON' THEN 'EON'
+      WHEN 'UB' THEN 'UB'
+      WHEN slug_n > 1
+        THEN LEFT(tag_code, 40) || '_' || UPPER(REPLACE(LEFT(provider_id, 6), '-', ''))
+      ELSE tag_code
+    END AS pool_code
   FROM dedup
 )
 SELECT
@@ -257,29 +169,30 @@ SELECT
   display_name,
   bucket,
   tag_code,
+  pool_code,
   window_days,
-  pool_name,
-  COALESCE(shared_pool_id, 'ld_pool_' || LOWER(tag_code)) AS pool_id
+  pool_name
 FROM final;
 
--- Per-supplier pools (skip shared BG / EON / UB)
+-- Per-supplier pools only (shared BG / EON / UB already in 04)
 INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
-SELECT DISTINCT
-  r.pool_id,
-  r.tag_code,
+SELECT
+  gen_random_uuid(),
+  r.pool_code,
   r.pool_name,
   'STANDARD'::pool_type,
   false,
   CURRENT_TIMESTAMP,
   CURRENT_TIMESTAMP
-FROM ld_provider_route r
-WHERE r.bucket IN ('BG_LITE', 'SUPPLIER')
-ON CONFLICT (id) DO UPDATE SET
-  code = EXCLUDED.code,
+FROM (
+  SELECT DISTINCT pool_code, pool_name
+  FROM ld_provider_route
+  WHERE bucket IN ('BG_LITE', 'SUPPLIER')
+) r
+ON CONFLICT (code) DO UPDATE SET
   name = EXCLUDED.name,
   "updatedAt" = CURRENT_TIMESTAMP;
 
--- Routing map
 INSERT INTO public.crm_provider_family
   ("providerId", family, "tagCode", "poolId", "windowDays", "displayName",
    "isActive", "isManual", "matchedPattern", "createdAt", "updatedAt")
@@ -287,7 +200,7 @@ SELECT
   r.provider_id,
   r.bucket,
   r.tag_code,
-  r.pool_id,
+  p.id,
   r.window_days,
   r.display_name,
   true,
@@ -296,6 +209,7 @@ SELECT
   CURRENT_TIMESTAMP,
   CURRENT_TIMESTAMP
 FROM ld_provider_route r
+JOIN public.pools p ON p.code = r.pool_code
 ON CONFLICT ("providerId") DO UPDATE SET
   family = EXCLUDED.family,
   "tagCode" = EXCLUDED."tagCode",
@@ -306,19 +220,13 @@ ON CONFLICT ("providerId") DO UPDATE SET
   "updatedAt" = CURRENT_TIMESTAMP
 WHERE crm_provider_family."isManual" = false;
 
--- One NOW + one IN_WINDOW rule per distinct tagCode (shared BG/EON/UB included)
 WITH tags AS (
-  SELECT DISTINCT
-    tag_code,
-    pool_id,
-    window_days,
-    bucket
+  SELECT DISTINCT tag_code, pool_code, window_days
   FROM ld_provider_route
+  WHERE tag_code NOT IN ('EON', 'BG', 'UB', 'OTHER')
 ),
 numbered AS (
-  SELECT
-    t.*,
-    200 + ROW_NUMBER() OVER (ORDER BY t.tag_code) * 2 AS pri_now
+  SELECT t.*, 200 + ROW_NUMBER() OVER (ORDER BY t.tag_code) * 2 AS pri_now
   FROM tags t
 )
 INSERT INTO public.crm_pool_rule
@@ -327,14 +235,14 @@ SELECT
   'ld_rule_' || LOWER(n.tag_code) || '_now',
   n.pri_now,
   n.tag_code || '_NOW',
-  n.pool_id,
+  p.id,
   true,
   n.tag_code || ' expired / no CED',
   false,
   CURRENT_TIMESTAMP,
   CURRENT_TIMESTAMP
 FROM numbered n
-WHERE n.tag_code NOT IN ('EON', 'BG', 'UB', 'OTHER')
+JOIN public.pools p ON p.code = n.pool_code
 ON CONFLICT (id) DO UPDATE SET
   priority = EXCLUDED.priority,
   tag = EXCLUDED.tag,
@@ -344,16 +252,12 @@ ON CONFLICT (id) DO UPDATE SET
   "updatedAt" = CURRENT_TIMESTAMP;
 
 WITH tags AS (
-  SELECT DISTINCT
-    tag_code,
-    pool_id,
-    window_days
+  SELECT DISTINCT tag_code, pool_code, window_days
   FROM ld_provider_route
+  WHERE tag_code NOT IN ('EON', 'BG', 'UB', 'OTHER')
 ),
 numbered AS (
-  SELECT
-    t.*,
-    201 + ROW_NUMBER() OVER (ORDER BY t.tag_code) * 2 AS pri_in
+  SELECT t.*, 201 + ROW_NUMBER() OVER (ORDER BY t.tag_code) * 2 AS pri_in
   FROM tags t
 )
 INSERT INTO public.crm_pool_rule
@@ -362,14 +266,14 @@ SELECT
   'ld_rule_' || LOWER(n.tag_code) || '_in',
   n.pri_in,
   n.tag_code || '_IN_WINDOW',
-  n.pool_id,
+  p.id,
   true,
   n.tag_code || ' in window 1–' || n.window_days::text,
   false,
   CURRENT_TIMESTAMP,
   CURRENT_TIMESTAMP
 FROM numbered n
-WHERE n.tag_code NOT IN ('EON', 'BG', 'UB', 'OTHER')
+JOIN public.pools p ON p.code = n.pool_code
 ON CONFLICT (id) DO UPDATE SET
   priority = EXCLUDED.priority,
   tag = EXCLUDED.tag,
@@ -378,22 +282,14 @@ ON CONFLICT (id) DO UPDATE SET
   description = EXCLUDED.description,
   "updatedAt" = CURRENT_TIMESTAMP;
 
--- QA
 SELECT family AS bucket, COUNT(*) AS providers
 FROM public.crm_provider_family
 WHERE "isActive" = true
 GROUP BY family
 ORDER BY providers DESC;
 
-SELECT id, code, name
-FROM public.pools
-WHERE id LIKE 'ld_pool_%'
-  AND type::text IN ('STANDARD', 'CAMPAIGN')
-ORDER BY name
-LIMIT 40;
-
-SELECT COUNT(*) AS supplier_rules
+SELECT COUNT(*) AS supplier_now_rules
 FROM public.crm_pool_rule
-WHERE id LIKE 'ld_rule_%'
-  AND tag LIKE '%_NOW'
-  AND "isActive" = true;
+WHERE tag LIKE '%_NOW'
+  AND "isActive" = true
+  AND id LIKE 'ld_rule_%';

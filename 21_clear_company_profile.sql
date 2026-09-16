@@ -18,5 +18,11 @@ WHERE id IN (
 
 SELECT
   COUNT(*) FILTER (WHERE "profileId" IS NOT NULL) AS still_have_agent,
-  COUNT(*) FILTER (WHERE "poolId" LIKE 'ld_pool_%') AS on_shared_pool
+  COUNT(*) FILTER (
+    WHERE EXISTS (
+      SELECT 1 FROM public.crm_pool_rule r
+      WHERE r."poolId" = companies."poolId"
+        AND COALESCE(r."isActive", true) = true
+    )
+  ) AS on_ld_rule_pool
 FROM public.companies;

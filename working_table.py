@@ -136,6 +136,18 @@ except Exception as e:
     )
     print("crm_company_load_sale skip", str(e)[:160])
 
+# pools.id = UUID; pools.code = stable key (BG, COMPLAINT, …).
+spark.sql(
+    """
+    CREATE OR REPLACE TABLE crm_load.new_crm.ld_pool_by_code AS
+    SELECT code, FIRST(id) AS pool_id
+    FROM crm_load.new_crm.snap_pools
+    WHERE code IS NOT NULL AND TRIM(code) <> ''
+    GROUP BY code
+    """
+)
+print("ld_pool_by_code", spark.table("crm_load.new_crm.ld_pool_by_code").count())
+
 # Load origin = legacy_site_mappings.campaign (Retention / Supplier).
 # Not the lead-tag Campaign pool. Column `source` still matched just in case.
 maps = jdbc_table("public.legacy_site_mappings")
@@ -695,9 +707,10 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC     )
 # MAGIC ),
 # MAGIC complaint_xfer AS (
-# MAGIC   SELECT DISTINCT `companyId` AS company_id
-# MAGIC   FROM crm_load.new_crm.snap_company_pool_audits
-# MAGIC   WHERE `poolId` = 'ld_pool_complaint'
+# MAGIC   SELECT DISTINCT a.`companyId` AS company_id
+# MAGIC   FROM crm_load.new_crm.snap_company_pool_audits a
+# MAGIC   INNER JOIN crm_load.new_crm.ld_pool_by_code cp ON cp.code = 'COMPLAINT'
+# MAGIC   WHERE a.`poolId` = cp.pool_id
 # MAGIC ),
 # MAGIC last_deals AS (
 # MAGIC   SELECT
@@ -863,7 +876,9 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC   CASE
 # MAGIC     WHEN COALESCE(has_complaint_note, false)
 # MAGIC       OR COALESCE(has_complaint_transfer, false)
-# MAGIC       OR current_pool_id = 'ld_pool_complaint'
+# MAGIC       OR current_pool_id = (
+# MAGIC         SELECT pool_id FROM crm_load.new_crm.ld_pool_by_code WHERE code = 'COMPLAINT' LIMIT 1
+# MAGIC       )
 # MAGIC       THEN 'COMPLAINT'
 # MAGIC     WHEN COALESCE(has_open_callback, false) THEN 'CALLBACK'
 # MAGIC     WHEN COALESCE(is_current_pool_locked, false) OR COALESCE(is_gdpr_pool, false) THEN 'LOCKED'
@@ -932,7 +947,9 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC   (
 # MAGIC     COALESCE(has_complaint_note, false)
 # MAGIC     OR COALESCE(has_complaint_transfer, false)
-# MAGIC     OR current_pool_id = 'ld_pool_complaint'
+# MAGIC     OR current_pool_id = (
+# MAGIC       SELECT pool_id FROM crm_load.new_crm.ld_pool_by_code WHERE code = 'COMPLAINT' LIMIT 1
+# MAGIC     )
 # MAGIC     OR COALESCE(has_open_callback, false)
 # MAGIC     OR COALESCE(is_current_pool_locked, false)
 # MAGIC     OR COALESCE(is_gdpr_pool, false)
@@ -987,11 +1004,11 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   w.current_pool_id,
 # MAGIC   w.lead_tag,
 # MAGIC   CASE
-# MAGIC     WHEN w.lead_tag = 'COMPLAINT' THEN COALESCE(r.`poolId`, 'ld_pool_complaint')
+# MAGIC     WHEN w.lead_tag = 'COMPLAINT' THEN COALESCE(r.`poolId`, cpool.pool_id)
 # MAGIC     WHEN w.lead_tag = 'CALLBACK' THEN COALESCE(w.callback_owner_pool_id, w.current_pool_id)
 # MAGIC     WHEN w.lead_tag = 'LOCKED' THEN w.current_pool_id
 # MAGIC     WHEN COALESCE(w.is_protected, false) AND w.lead_tag <> 'COMPLAINT' THEN w.current_pool_id
-# MAGIC     ELSE COALESCE(r.`poolId`, 'ld_pool_unassigned')
+# MAGIC     ELSE COALESCE(r.`poolId`, upool.pool_id)
 # MAGIC   END AS proposed_pool_id,
 # MAGIC   w.site_count,
 # MAGIC   w.win_provider_id,
@@ -1029,6 +1046,8 @@ print("crm_pool_rule", _rules.count())
 # MAGIC LEFT JOIN crm_load.new_crm.snap_crm_pool_rule r
 # MAGIC   ON r.tag = w.lead_tag
 # MAGIC  AND COALESCE(r.`isActive`, true) = true
+# MAGIC LEFT JOIN crm_load.new_crm.ld_pool_by_code cpool ON cpool.code = 'COMPLAINT'
+# MAGIC LEFT JOIN crm_load.new_crm.ld_pool_by_code upool ON upool.code = 'UNASSIGNED'
 # MAGIC ;
 
 # COMMAND ----------
