@@ -19,9 +19,8 @@
 # MAGIC Deal or fallback with no CED = Nightly day 0 → Past Retention, not Unassigned.
 # MAGIC
 # MAGIC **Does not write `companies.poolId` until Step 4.**
-# MAGIC Tag → CAMPAIGN / STANDARD parent. If that parent has active `pool_links`,
-# MAGIC fair-share non-sticky companies onto those PRIVATE children (Nightly
-# MAGIC average: new leads fill the shorter bag first).
+# MAGIC Tag → CAMPAIGN / STANDARD shared parent. Fair-share to PRIVATE children
+# MAGIC (pool_links) is parked — apply writes shared pools only for now.
 
 # COMMAND ----------
 
@@ -94,7 +93,7 @@ for table in [
     "site_meters",
     "callbacks",
     "pools",
-    "pool_links",
+    # "pool_links",  # parked — fair-share to PRIVATE agent bags off for now
     "crm_pool_rule",
     "notes",
     "profiles",
@@ -974,7 +973,7 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC ## Step 3 — Propose pool
 # MAGIC
 # MAGIC Tag → **parent** CAMPAIGN (or STANDARD) pool via `crm_pool_rule` (snapshot).
-# MAGIC Next cell: if that parent has `pool_links`, fair-share to PRIVATE children.
+# MAGIC Fair-share to PRIVATE children is parked (Step 3b). Apply uses shared parent only.
 # MAGIC Sticky still wins: callback / locked stay; complaint uses the rule.
 
 # COMMAND ----------
@@ -1062,30 +1061,24 @@ print("crm_pool_rule", _rules.count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 3b — Fair share to PRIVATE children
+# MAGIC ## Step 3b — Fair share to PRIVATE children (PARKED)
 # MAGIC
-# MAGIC Reads `pool_links`. Parent with no children stays shared.
-# MAGIC Already on a valid child → keep. Sticky → not moved.
-# MAGIC New / on-parent companies → Nightly average: each new lead goes to the
-# MAGIC linked child with the fewest kept companies for that parent (Kelly gets
-# MAGIC the next few if she is short). Does not reclaim from the larger bag.
-# MAGIC `parent_pool_id` is the campaign (Retention / Past Retention / E.ON / …).
-# MAGIC Apply must restamp `sourcePoolId` even when the agent bag stays the same
-# MAGIC (Kelly is a child of both Retentions and Past Retentions).
+# MAGIC Re-enable `pool_links` snapshot + fair-share SQL below when Jack/Kelly
+# MAGIC split is turned back on. For now: shared parent only.
 
 # COMMAND ----------
 
-# DBTITLE 1,snapshot pool_links
-_links = jdbc_table("public.pool_links")
-_links.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-    "crm_load.new_crm.snap_pool_links"
-)
-print("pool_links", _links.count())
-display(_links)
+# DBTITLE 1,snapshot pool_links (parked)
+# _links = jdbc_table("public.pool_links")
+# _links.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+#     "crm_load.new_crm.snap_pool_links"
+# )
+# print("pool_links", _links.count())
+# display(_links)
 
 # COMMAND ----------
 
-# DBTITLE 1,fair share proposed_pool_id
+# DBTITLE 1,shared parent only (no fair-share)
 # MAGIC %sql
 # MAGIC CREATE OR REPLACE TEMP VIEW ld_before_split AS
 # MAGIC SELECT * FROM crm_load.new_crm.ld_working
@@ -1095,132 +1088,180 @@ display(_links)
 
 # MAGIC %sql
 # MAGIC CREATE OR REPLACE TABLE crm_load.new_crm.ld_working AS
-# MAGIC WITH links AS (
-# MAGIC   SELECT
-# MAGIC     `parentPoolId` AS parent_pool_id,
-# MAGIC     `childPoolId` AS child_pool_id
-# MAGIC   FROM crm_load.new_crm.snap_pool_links
-# MAGIC   WHERE COALESCE(`isActive`, true) = true
-# MAGIC     AND CAST(`parentType` AS STRING) IN ('STANDARD', 'CAMPAIGN')
-# MAGIC     AND CAST(`childType` AS STRING) = 'PRIVATE'
-# MAGIC ),
-# MAGIC members AS (
-# MAGIC   SELECT parent_pool_id, child_pool_id
-# MAGIC   FROM links
-# MAGIC ),
-# MAGIC keep AS (
-# MAGIC   SELECT
-# MAGIC     w.company_id,
-# MAGIC     w.current_pool_id AS child_id,
-# MAGIC     w.proposed_pool_id AS parent_pool_id
-# MAGIC   FROM ld_before_split w
-# MAGIC   INNER JOIN links l
-# MAGIC     ON l.parent_pool_id = w.proposed_pool_id
-# MAGIC    AND l.child_pool_id = w.current_pool_id
-# MAGIC   WHERE COALESCE(w.is_protected, false) = false
-# MAGIC ),
-# MAGIC need AS (
-# MAGIC   SELECT
-# MAGIC     w.company_id,
-# MAGIC     w.proposed_pool_id AS parent_pool_id,
-# MAGIC     ROW_NUMBER() OVER (PARTITION BY w.proposed_pool_id ORDER BY w.company_id) AS cand_rn
-# MAGIC   FROM ld_before_split w
-# MAGIC   WHERE COALESCE(w.is_protected, false) = false
-# MAGIC     AND EXISTS (
-# MAGIC       SELECT 1 FROM members m WHERE m.parent_pool_id = w.proposed_pool_id
-# MAGIC     )
-# MAGIC     AND NOT EXISTS (SELECT 1 FROM keep k WHERE k.company_id = w.company_id)
-# MAGIC ),
-# MAGIC bag AS (
-# MAGIC   SELECT
-# MAGIC     m.parent_pool_id,
-# MAGIC     m.child_pool_id,
-# MAGIC     COUNT(k.company_id) AS have_n
-# MAGIC   FROM members m
-# MAGIC   LEFT JOIN keep k
-# MAGIC     ON k.parent_pool_id = m.parent_pool_id
-# MAGIC    AND k.child_id = m.child_pool_id
-# MAGIC   GROUP BY m.parent_pool_id, m.child_pool_id
-# MAGIC ),
-# MAGIC parent_need AS (
-# MAGIC   SELECT parent_pool_id, COUNT(*) AS need_n
-# MAGIC   FROM need
-# MAGIC   GROUP BY parent_pool_id
-# MAGIC ),
-# MAGIC slots AS (
-# MAGIC   SELECT
-# MAGIC     b.parent_pool_id,
-# MAGIC     b.child_pool_id,
-# MAGIC     b.have_n,
-# MAGIC     pe.slot_i
-# MAGIC   FROM bag b
-# MAGIC   INNER JOIN parent_need p
-# MAGIC     ON p.parent_pool_id = b.parent_pool_id
-# MAGIC    AND p.need_n > 0
-# MAGIC   LATERAL VIEW EXPLODE(sequence(1, p.need_n)) pe AS slot_i
-# MAGIC ),
-# MAGIC ranked_slots AS (
-# MAGIC   SELECT
-# MAGIC     parent_pool_id,
-# MAGIC     child_pool_id,
-# MAGIC     ROW_NUMBER() OVER (
-# MAGIC       PARTITION BY parent_pool_id
-# MAGIC       ORDER BY have_n + slot_i, child_pool_id, slot_i
-# MAGIC     ) AS fill_rn
-# MAGIC   FROM slots
-# MAGIC ),
-# MAGIC assigned AS (
-# MAGIC   SELECT n.company_id, r.child_pool_id
-# MAGIC   FROM need n
-# MAGIC   INNER JOIN ranked_slots r
-# MAGIC     ON r.parent_pool_id = n.parent_pool_id
-# MAGIC    AND r.fill_rn = n.cand_rn
-# MAGIC )
 # MAGIC SELECT
-# MAGIC   w.company_id,
-# MAGIC   w.current_pool_id,
-# MAGIC   w.lead_tag,
-# MAGIC   w.proposed_pool_id AS parent_pool_id,
-# MAGIC   CASE
-# MAGIC     WHEN COALESCE(w.is_protected, false) THEN w.proposed_pool_id
-# MAGIC     ELSE COALESCE(k.child_id, a.child_pool_id, w.proposed_pool_id)
-# MAGIC   END AS proposed_pool_id,
-# MAGIC   w.site_count,
-# MAGIC   w.win_provider_id,
-# MAGIC   w.win_provider_name,
-# MAGIC   w.win_family,
-# MAGIC   w.win_tag_code,
-# MAGIC   w.win_window_days,
-# MAGIC   w.win_end_date,
-# MAGIC   w.win_contract_type,
-# MAGIC   w.is_win_dfv,
-# MAGIC   w.raw_days_left,
-# MAGIC   w.days_left,
-# MAGIC   w.last_deal_raw_days_left,
-# MAGIC   w.last_deal_days_left,
-# MAGIC   w.last_deal_days_since,
-# MAGIC   w.has_any_past_deal,
-# MAGIC   w.hasPastSale,
-# MAGIC   w.lastDealEndDate,
-# MAGIC   w.fallback_source,
-# MAGIC   w.source_kind,
-# MAGIC   w.mapping_source,
-# MAGIC   w.source_family,
-# MAGIC   w.load_source_id,
-# MAGIC   w.has_open_callback,
-# MAGIC   w.callback_owner_pool_id,
-# MAGIC   w.is_current_pool_locked,
-# MAGIC   w.is_gdpr_pool,
-# MAGIC   w.has_complaint_note,
-# MAGIC   w.has_complaint_transfer,
-# MAGIC   w.has_rejected_deal,
-# MAGIC   w.is_exclusively_deenergised,
-# MAGIC   w.is_protected,
-# MAGIC   w.snapshot_at
-# MAGIC FROM ld_before_split w
-# MAGIC LEFT JOIN keep k ON k.company_id = w.company_id
-# MAGIC LEFT JOIN assigned a ON a.company_id = w.company_id
+# MAGIC   company_id,
+# MAGIC   current_pool_id,
+# MAGIC   lead_tag,
+# MAGIC   proposed_pool_id,
+# MAGIC   proposed_pool_id AS parent_pool_id,
+# MAGIC   site_count,
+# MAGIC   win_provider_id,
+# MAGIC   win_provider_name,
+# MAGIC   win_family,
+# MAGIC   win_tag_code,
+# MAGIC   win_window_days,
+# MAGIC   win_end_date,
+# MAGIC   win_contract_type,
+# MAGIC   is_win_dfv,
+# MAGIC   raw_days_left,
+# MAGIC   days_left,
+# MAGIC   last_deal_raw_days_left,
+# MAGIC   last_deal_days_left,
+# MAGIC   last_deal_days_since,
+# MAGIC   has_any_past_deal,
+# MAGIC   hasPastSale,
+# MAGIC   lastDealEndDate,
+# MAGIC   fallback_source,
+# MAGIC   source_kind,
+# MAGIC   mapping_source,
+# MAGIC   source_family,
+# MAGIC   load_source_id,
+# MAGIC   has_open_callback,
+# MAGIC   callback_owner_pool_id,
+# MAGIC   is_current_pool_locked,
+# MAGIC   is_gdpr_pool,
+# MAGIC   has_complaint_note,
+# MAGIC   has_complaint_transfer,
+# MAGIC   has_rejected_deal,
+# MAGIC   is_exclusively_deenergised,
+# MAGIC   is_protected,
+# MAGIC   snapshot_at
+# MAGIC FROM ld_before_split
 # MAGIC ;
+
+# COMMAND ----------
+
+# DBTITLE 1,fair share proposed_pool_id (parked — re-enable with pool_links)
+# Re-enable: uncomment pool_links snapshot above, then spark.sql(_FAIR_SHARE_SQL)
+_FAIR_SHARE_SQL = """
+CREATE OR REPLACE TABLE crm_load.new_crm.ld_working AS
+WITH links AS (
+  SELECT
+    `parentPoolId` AS parent_pool_id,
+    `childPoolId` AS child_pool_id
+  FROM crm_load.new_crm.snap_pool_links
+  WHERE COALESCE(`isActive`, true) = true
+    AND CAST(`parentType` AS STRING) IN ('STANDARD', 'CAMPAIGN')
+    AND CAST(`childType` AS STRING) = 'PRIVATE'
+),
+members AS (
+  SELECT parent_pool_id, child_pool_id
+  FROM links
+),
+keep AS (
+  SELECT
+    w.company_id,
+    w.current_pool_id AS child_id,
+    w.proposed_pool_id AS parent_pool_id
+  FROM ld_before_split w
+  INNER JOIN links l
+    ON l.parent_pool_id = w.proposed_pool_id
+   AND l.child_pool_id = w.current_pool_id
+  WHERE COALESCE(w.is_protected, false) = false
+),
+need AS (
+  SELECT
+    w.company_id,
+    w.proposed_pool_id AS parent_pool_id,
+    ROW_NUMBER() OVER (PARTITION BY w.proposed_pool_id ORDER BY w.company_id) AS cand_rn
+  FROM ld_before_split w
+  WHERE COALESCE(w.is_protected, false) = false
+    AND EXISTS (
+      SELECT 1 FROM members m WHERE m.parent_pool_id = w.proposed_pool_id
+    )
+    AND NOT EXISTS (SELECT 1 FROM keep k WHERE k.company_id = w.company_id)
+),
+bag AS (
+  SELECT
+    m.parent_pool_id,
+    m.child_pool_id,
+    COUNT(k.company_id) AS have_n
+  FROM members m
+  LEFT JOIN keep k
+    ON k.parent_pool_id = m.parent_pool_id
+   AND k.child_id = m.child_pool_id
+  GROUP BY m.parent_pool_id, m.child_pool_id
+),
+parent_need AS (
+  SELECT parent_pool_id, COUNT(*) AS need_n
+  FROM need
+  GROUP BY parent_pool_id
+),
+slots AS (
+  SELECT
+    b.parent_pool_id,
+    b.child_pool_id,
+    b.have_n,
+    pe.slot_i
+  FROM bag b
+  INNER JOIN parent_need p
+    ON p.parent_pool_id = b.parent_pool_id
+   AND p.need_n > 0
+  LATERAL VIEW EXPLODE(sequence(1, p.need_n)) pe AS slot_i
+),
+ranked_slots AS (
+  SELECT
+    parent_pool_id,
+    child_pool_id,
+    ROW_NUMBER() OVER (
+      PARTITION BY parent_pool_id
+      ORDER BY have_n + slot_i, child_pool_id, slot_i
+    ) AS fill_rn
+  FROM slots
+),
+assigned AS (
+  SELECT n.company_id, r.child_pool_id
+  FROM need n
+  INNER JOIN ranked_slots r
+    ON r.parent_pool_id = n.parent_pool_id
+   AND r.fill_rn = n.cand_rn
+)
+SELECT
+  w.company_id,
+  w.current_pool_id,
+  w.lead_tag,
+  w.proposed_pool_id AS parent_pool_id,
+  CASE
+    WHEN COALESCE(w.is_protected, false) THEN w.proposed_pool_id
+    ELSE COALESCE(k.child_id, a.child_pool_id, w.proposed_pool_id)
+  END AS proposed_pool_id,
+  w.site_count,
+  w.win_provider_id,
+  w.win_provider_name,
+  w.win_family,
+  w.win_tag_code,
+  w.win_window_days,
+  w.win_end_date,
+  w.win_contract_type,
+  w.is_win_dfv,
+  w.raw_days_left,
+  w.days_left,
+  w.last_deal_raw_days_left,
+  w.last_deal_days_left,
+  w.last_deal_days_since,
+  w.has_any_past_deal,
+  w.hasPastSale,
+  w.lastDealEndDate,
+  w.fallback_source,
+  w.source_kind,
+  w.mapping_source,
+  w.source_family,
+  w.load_source_id,
+  w.has_open_callback,
+  w.callback_owner_pool_id,
+  w.is_current_pool_locked,
+  w.is_gdpr_pool,
+  w.has_complaint_note,
+  w.has_complaint_transfer,
+  w.has_rejected_deal,
+  w.is_exclusively_deenergised,
+  w.is_protected,
+  w.snapshot_at
+FROM ld_before_split w
+LEFT JOIN keep k ON k.company_id = w.company_id
+LEFT JOIN assigned a ON a.company_id = w.company_id
+"""
+# spark.sql(_FAIR_SHARE_SQL)
 
 # COMMAND ----------
 
@@ -1236,8 +1277,8 @@ display(_links)
 # MAGIC %md
 # MAGIC ## Step 4 — Write pools, then apply
 # MAGIC
-# MAGIC Writes `ld_apply_batch` (STANDARD parent, or PRIVATE child when linked)
-# MAGIC plus `proposed_campaign_id` = parent (Retention / E.ON / …).
+# MAGIC Writes `ld_apply_batch` (shared STANDARD / CAMPAIGN parent only).
+# MAGIC `proposed_campaign_id` = same parent (Retention / E.ON / …).
 # MAGIC Apply moves the pool and writes that parent on
 # MAGIC `company_pool_placements.sourcePoolId` (no ALTER on companies).
 # MAGIC Campaign on the company is `sourcePoolId` (parent before split). No campaigns upsert.
@@ -1278,7 +1319,7 @@ shared_moves = spark.sql(
       )
     """
 )
-_write_apply_batch(shared_moves, "pool + campaign rows (parent or linked child)")
+_write_apply_batch(shared_moves, "pool + campaign rows (shared parent only)")
 
 _applied = pg_query("SELECT public.ld_apply_batch_run() AS companies_moved")
 print("apply companies_moved", _applied.collect()[0]["companies_moved"])
@@ -1289,6 +1330,6 @@ print("apply companies_moved", _applied.collect()[0]["companies_moved"])
 # MAGIC ## Cron = this notebook
 # MAGIC
 # MAGIC Databricks Job on this notebook (top to bottom):
-# MAGIC **Password → Janitor → Snapshot → tag → parent → fair-share → apply.**
+# MAGIC **Password → Janitor → Snapshot → tag → parent → apply (shared pools).**
 # MAGIC That is the nightly cron. Do **not** also schedule `25_cron.sql` in Supabase
 # MAGIC or apply runs twice.
