@@ -74,12 +74,12 @@ CREATE INDEX IF NOT EXISTS crm_pool_rule_priority_idx
 -- ---------------------------------------------------------------------------
 INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
 VALUES
-  ('ld_pool_eon',       'EON',     'E.ON',            'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_eon_dfv',   'EON_DFV', 'E.ON DFV',        'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_bg',        'BG',      'British Gas',     'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_ub',        'UB',      'Utility Bidder',  'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_other',     'OTHER',   'Other',           'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_pool_unassigned','UNASSIGNED','Unassigned',    'STANDARD', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ('ld_pool_eon',       'EON',     'E.ON',            'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_pool_eon_dfv',   'EON_DFV', 'E.ON DFV',        'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_pool_bg',        'BG',      'British Gas',     'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_pool_ub',        'UB',      'Utility Bidder',  'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_pool_other',     'OTHER',   'Other',           'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_pool_unassigned','UNASSIGNED','Unassigned',    'STANDARD'::pool_type, false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (id) DO UPDATE SET
   code = EXCLUDED.code,
   name = EXCLUDED.name,
@@ -268,7 +268,7 @@ SELECT DISTINCT
   r.pool_id,
   r.tag_code,
   r.pool_name,
-  'STANDARD',
+  'STANDARD'::pool_type,
   false,
   CURRENT_TIMESTAMP,
   CURRENT_TIMESTAMP
