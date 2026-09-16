@@ -311,8 +311,8 @@ last_deal_df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTab
 print("deal companies", deal_cos.count())
 print("last deals", last_deal_df.count())
 
-# Nightly: rejected deal blocks Retention / Customer Care.
-# Stay on the current pool so the agent can fix it (no supplier reshuffle).
+# Nightly: hasRejectedDeal blocks Retention / Customer Care only.
+# The deal stays on the Compliance Rejected tab — we do not pin the company pool.
 # isExclusivelyDeEnergised blocks supplier bags only (segment 0 / Unassigned).
 rejected_dest = "crm_load.new_crm.snap_rejected_deal_companies"
 dead_dest = "crm_load.new_crm.snap_exclusively_deenergised"
@@ -811,7 +811,6 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC       THEN 'COMPLAINT'
 # MAGIC     WHEN COALESCE(has_open_callback, false) THEN 'CALLBACK'
 # MAGIC     WHEN COALESCE(is_current_pool_locked, false) OR COALESCE(is_gdpr_pool, false) THEN 'LOCKED'
-# MAGIC     WHEN COALESCE(has_rejected_deal, false) THEN 'REJECTED'
 # MAGIC     WHEN has_any_past_deal
 # MAGIC       AND NOT COALESCE(has_rejected_deal, false)
 # MAGIC       AND last_deal_days_since IS NOT NULL
@@ -886,7 +885,6 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC     OR COALESCE(has_open_callback, false)
 # MAGIC     OR COALESCE(is_current_pool_locked, false)
 # MAGIC     OR COALESCE(is_gdpr_pool, false)
-# MAGIC     OR COALESCE(has_rejected_deal, false)
 # MAGIC   ) AS is_protected,
 # MAGIC   CAST(NULL AS STRING) AS proposed_pool_id,
 # MAGIC   snapshot_at
@@ -941,7 +939,6 @@ print("crm_pool_rule", _rules.count())
 # MAGIC     WHEN w.lead_tag = 'COMPLAINT' THEN COALESCE(r.`poolId`, 'ld_pool_complaint')
 # MAGIC     WHEN w.lead_tag = 'CALLBACK' THEN COALESCE(w.callback_owner_pool_id, w.current_pool_id)
 # MAGIC     WHEN w.lead_tag = 'LOCKED' THEN w.current_pool_id
-# MAGIC     WHEN w.lead_tag = 'REJECTED' THEN w.current_pool_id
 # MAGIC     WHEN COALESCE(w.is_protected, false) AND w.lead_tag <> 'COMPLAINT' THEN w.current_pool_id
 # MAGIC     ELSE COALESCE(r.`poolId`, 'ld_pool_unassigned')
 # MAGIC   END AS proposed_pool_id,
