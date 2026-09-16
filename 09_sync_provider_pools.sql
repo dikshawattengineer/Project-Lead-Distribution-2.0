@@ -154,10 +154,10 @@ final AS (
     END AS tag_code,
     window_days,
     pool_name,
-    CASE bucket
-      WHEN 'BG' THEN 'BG'
-      WHEN 'EON' THEN 'EON'
-      WHEN 'UB' THEN 'UB'
+    CASE
+      WHEN bucket = 'BG' THEN 'BG'
+      WHEN bucket = 'EON' THEN 'EON'
+      WHEN bucket = 'UB' THEN 'UB'
       WHEN slug_n > 1
         THEN LEFT(tag_code, 40) || '_' || UPPER(REPLACE(LEFT(provider_id, 6), '-', ''))
       ELSE tag_code
