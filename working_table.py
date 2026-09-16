@@ -6,8 +6,11 @@
 # MAGIC Tag order: **sticky first**, then Customer Care (7–60 days since sale),
 # MAGIC then Retention clock, then Corporate (21–200), then supplier.
 # MAGIC
-# MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): E.ON deemed/flexible/variable
-# MAGIC **or** expired **or** no CED. BG / Other / UB expired stay on the normal supplier pool.
+# MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): **contract type**
+# MAGIC deemed/flexible/variable only (Nightly FVD). Past due / no CED → main E.ON.
+# MAGIC Supplier tags come from `crm_provider_family` (sync `09_sync_provider_pools.sql`):
+# MAGIC each known provider → own pool (name = displayName), except shared BG / E.ON / UB.
+# MAGIC BG (not Lite) window 548; everyone else 365. Unknown provider → Other.
 # MAGIC
 # MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings`.
 # MAGIC Load origin is the **`campaign` column** (Retention / Supplier) — that is
@@ -101,6 +104,22 @@ for table in [
     dest = f"crm_load.new_crm.snap_{table}"
     df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dest)
     print(table, df.count())
+
+try:
+    _fam = jdbc_table("public.crm_provider_family")
+    _fam.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_crm_provider_family"
+    )
+    print("crm_provider_family", _fam.count())
+except Exception as exc:
+    print("crm_provider_family skip — run 09_sync_provider_pools.sql first:", str(exc)[:200])
+    spark.createDataFrame(
+        [],
+        "providerId string, family string, tagCode string, poolId string, "
+        "windowDays int, displayName string, isActive boolean",
+    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+        "crm_load.new_crm.snap_crm_provider_family"
+    )
 
 try:
     sale = jdbc_table("public.crm_company_load_sale")
@@ -521,8 +540,9 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC %md
 # MAGIC ## Working table (SQL)
 # MAGIC
-# MAGIC `is_win_dfv` is the **winning** contract only (Nightly supplier filter).
-# MAGIC No supplier → Unassigned, never E.ON DFV.
+# MAGIC `is_win_dfv` is the **winning** contract only (Nightly FVD = contract type).
+# MAGIC No supplier → Other / Unassigned, never E.ON DFV.
+# MAGIC Family / tagCode / windowDays from `crm_provider_family` (09 sync).
 # MAGIC Last deal: Prisma `deals.siteMeterId` → `site_meters` → `company_sites`.
 # MAGIC Days left is still that deal's `contracts.endDate` − today.
 
@@ -569,20 +589,48 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC         OR LOWER(CAST(c.`type` AS STRING)) LIKE '%variable%'
 # MAGIC       THEN true ELSE false
 # MAGIC     END AS is_dfv,
-# MAGIC     CASE
-# MAGIC       WHEN LOWER(p.`displayName`) LIKE '%british gas lite%' THEN 'OTHER'
-# MAGIC       WHEN LOWER(p.`displayName`) LIKE '%british gas%'      THEN 'BG'
-# MAGIC       WHEN LOWER(p.`displayName`) LIKE '%e.on%'             THEN 'EON'
-# MAGIC       WHEN LOWER(p.`displayName`) LIKE '%e-on%'             THEN 'EON'
-# MAGIC       WHEN LOWER(p.`displayName`) LIKE 'eon%'               THEN 'EON'
-# MAGIC       WHEN LOWER(p.`displayName`) LIKE '%utility bidder%'   THEN 'UB'
-# MAGIC       ELSE 'OTHER'
-# MAGIC     END AS family
+# MAGIC     COALESCE(
+# MAGIC       NULLIF(TRIM(f.`tagCode`), ''),
+# MAGIC       CASE
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%british gas lite%'
+# MAGIC           OR LOWER(p.`displayName`) LIKE '%bg lite%' THEN 'BG_LITE'
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%british gas%' THEN 'BG'
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%e.on%'
+# MAGIC           OR LOWER(p.`displayName`) LIKE '%e-on%'
+# MAGIC           OR LOWER(p.`displayName`) LIKE 'eon%' THEN 'EON'
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%utility bidder%' THEN 'UB'
+# MAGIC         WHEN p.id IS NULL THEN 'OTHER'
+# MAGIC         ELSE 'OTHER'
+# MAGIC       END
+# MAGIC     ) AS tag_code,
+# MAGIC     COALESCE(
+# MAGIC       f.`windowDays`,
+# MAGIC       CASE
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%british gas lite%' THEN 365
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%british gas%' THEN 548
+# MAGIC         ELSE 365
+# MAGIC       END
+# MAGIC     ) AS window_days,
+# MAGIC     COALESCE(
+# MAGIC       NULLIF(TRIM(f.family), ''),
+# MAGIC       CASE
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%british gas lite%' THEN 'BG_LITE'
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%british gas%' THEN 'BG'
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%e.on%'
+# MAGIC           OR LOWER(p.`displayName`) LIKE '%e-on%'
+# MAGIC           OR LOWER(p.`displayName`) LIKE 'eon%' THEN 'EON'
+# MAGIC         WHEN LOWER(p.`displayName`) LIKE '%utility bidder%' THEN 'UB'
+# MAGIC         ELSE 'OTHER'
+# MAGIC       END
+# MAGIC     ) AS family
 # MAGIC   FROM contract_cos cc
 # MAGIC   JOIN crm_load.new_crm.snap_contracts c
 # MAGIC     ON c.id = cc.contract_id
 # MAGIC   LEFT JOIN crm_load.new_crm.snap_providers p
 # MAGIC     ON c.`providerId` = p.id
+# MAGIC   LEFT JOIN crm_load.new_crm.snap_crm_provider_family f
+# MAGIC     ON f.`providerId` = c.`providerId`
+# MAGIC    AND COALESCE(f.`isActive`, true) = true
 # MAGIC   WHERE cc.company_id IS NOT NULL
 # MAGIC ),
 # MAGIC winning AS (
@@ -595,7 +643,12 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC         ORDER BY
 # MAGIC           CASE WHEN raw_days_left IS NULL THEN 1 ELSE 0 END,
 # MAGIC           days_left ASC,
-# MAGIC           CASE family WHEN 'EON' THEN 1 WHEN 'BG' THEN 2 WHEN 'UB' THEN 3 ELSE 4 END
+# MAGIC           CASE tag_code
+# MAGIC             WHEN 'EON' THEN 1
+# MAGIC             WHEN 'BG' THEN 2
+# MAGIC             WHEN 'UB' THEN 3
+# MAGIC             ELSE 4
+# MAGIC           END
 # MAGIC       ) AS rn
 # MAGIC     FROM contracts_f
 # MAGIC   ) x
@@ -710,6 +763,8 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC   w.provider_id                                    AS win_provider_id,
 # MAGIC   w.provider_name                                  AS win_provider_name,
 # MAGIC   w.family                                         AS win_family,
+# MAGIC   w.tag_code                                       AS win_tag_code,
+# MAGIC   COALESCE(w.window_days, 365)                     AS win_window_days,
 # MAGIC   w.end_date                                       AS win_end_date,
 # MAGIC   w.contract_type                                  AS win_contract_type,
 # MAGIC   COALESCE(w.is_dfv, false)                        AS is_win_dfv,
@@ -786,7 +841,8 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC %md
 # MAGIC ## Step 2 — Tag (sticky first)
 # MAGIC
-# MAGIC `*_NOW` = winning supplier is DFV **or** expired **or** no CED.
+# MAGIC E.ON DFV = real DFV contract type only. `*_NOW` = expired / no CED on that
+# MAGIC supplier tag (main pool). `*_IN_WINDOW` uses that supplier's windowDays.
 # MAGIC `win_family IS NULL` stays `UNASSIGNED` — not E.ON DFV.
 
 # COMMAND ----------
@@ -833,27 +889,22 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC       THEN 'CORPORATE'
 # MAGIC     WHEN site_count >= 21 THEN 'UNASSIGNED'
 # MAGIC     WHEN COALESCE(is_exclusively_deenergised, false) THEN 'UNASSIGNED'
-# MAGIC     WHEN win_family IS NULL THEN 'UNASSIGNED'
-# MAGIC     WHEN is_win_dfv OR raw_days_left IS NULL OR days_left <= 0 THEN
-# MAGIC       CASE win_family
-# MAGIC         WHEN 'EON' THEN 'EON_NOW'
-# MAGIC         WHEN 'BG'  THEN 'BG_NOW'
-# MAGIC         WHEN 'UB'  THEN 'UB_NOW'
-# MAGIC         ELSE 'OTHER_NOW'
-# MAGIC       END
-# MAGIC     WHEN days_left <= CASE WHEN win_family = 'BG' THEN 548 ELSE 365 END THEN
-# MAGIC       CASE win_family
-# MAGIC         WHEN 'EON' THEN 'EON_IN_WINDOW'
-# MAGIC         WHEN 'BG'  THEN 'BG_IN_WINDOW'
-# MAGIC         WHEN 'UB'  THEN 'UB_IN_WINDOW'
-# MAGIC         ELSE 'OTHER_IN_WINDOW'
-# MAGIC       END
+# MAGIC     WHEN COALESCE(win_tag_code, win_family) IS NULL THEN 'UNASSIGNED'
+# MAGIC     WHEN COALESCE(is_win_dfv, false)
+# MAGIC       AND COALESCE(win_tag_code, win_family) = 'EON'
+# MAGIC       THEN 'EON_DFV'
+# MAGIC     WHEN raw_days_left IS NULL OR days_left <= 0 THEN
+# MAGIC       CONCAT(COALESCE(win_tag_code, win_family, 'OTHER'), '_NOW')
+# MAGIC     WHEN days_left <= COALESCE(win_window_days, 365) THEN
+# MAGIC       CONCAT(COALESCE(win_tag_code, win_family, 'OTHER'), '_IN_WINDOW')
 # MAGIC     ELSE 'PRE_WINDOW'
 # MAGIC   END AS lead_tag,
 # MAGIC   site_count,
 # MAGIC   win_provider_id,
 # MAGIC   win_provider_name,
 # MAGIC   win_family,
+# MAGIC   win_tag_code,
+# MAGIC   win_window_days,
 # MAGIC   win_end_date,
 # MAGIC   win_contract_type,
 # MAGIC   is_win_dfv,
@@ -946,6 +997,8 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   w.win_provider_id,
 # MAGIC   w.win_provider_name,
 # MAGIC   w.win_family,
+# MAGIC   w.win_tag_code,
+# MAGIC   w.win_window_days,
 # MAGIC   w.win_end_date,
 # MAGIC   w.win_contract_type,
 # MAGIC   w.is_win_dfv,
@@ -1117,6 +1170,8 @@ display(_links)
 # MAGIC   w.win_provider_id,
 # MAGIC   w.win_provider_name,
 # MAGIC   w.win_family,
+# MAGIC   w.win_tag_code,
+# MAGIC   w.win_window_days,
 # MAGIC   w.win_end_date,
 # MAGIC   w.win_contract_type,
 # MAGIC   w.is_win_dfv,

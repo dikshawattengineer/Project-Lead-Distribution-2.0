@@ -3,9 +3,10 @@
 -- the boss / app migrate first. Then run these files IN ORDER in Supabase:
 --
 --   1) 01_schema_and_seeds.sql          crm_provider_family, crm_pool_rule
---   2) 09_sync_provider_family.sql      name patterns + fill family map
+--   2) 09_sync_provider_pools.sql       providers → pools + tag rules + family map
 --   3) 04_seed_supplier_shared_pools.sql  shared ld_pool_* (type STANDARD) + tag rules
 --      (includes Retention, Upselling, Customer Care, Corporate)
+--      OR seed_dfv_pools.sql for E.ON DFV = contract type only
 --   4) 02_split_schema.sql              policy / member / filter (unused while
 --      apply stops at STANDARD shared pools)
 --   5) apply_ld_apply_batch.sql         ld_apply_batch + ld_apply_batch_run()
@@ -41,4 +42,4 @@
 --   ld_pool_unassigned, ld_pool_retention, ld_pool_retention_ooc,
 --   ld_pool_upselling, ld_pool_customer_care, ld_pool_corporate
 
-SELECT 'See comments: run 01 → 09 → 04 → 02 → apply → 24 → 25' AS rebuild_order;
+SELECT 'See comments: run 01 → 09_sync_provider_pools → 04/seed_dfv → apply → 24' AS rebuild_order;

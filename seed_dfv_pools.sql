@@ -1,4 +1,6 @@
--- Only E.ON has a DFV pool. BG / Other / UB expired → normal supplier pool.
+-- Only E.ON has a DFV pool — real deemed/flexible/variable only (Nightly FVD).
+-- Past due / no CED → main E.ON via EON_NOW (not DFV).
+-- BG / UB / Other expired → their main supplier pools.
 -- Safe to re-run. Remaps companies already left on the old * _dfv bags.
 
 BEGIN;
@@ -17,10 +19,11 @@ SET
 INSERT INTO public.crm_pool_rule
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 VALUES
-  ('ld_rule_eon_now',   29, 'EON_NOW',   'ld_pool_eon_dfv', true, 'E.ON expired / no CED / DFV', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_rule_eon_dfv',   28, 'EON_DFV',   'ld_pool_eon_dfv', true, 'E.ON deemed / flexible / variable only', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+  ('ld_rule_eon_now',   29, 'EON_NOW',   'ld_pool_eon',     true, 'E.ON expired / no CED → main E.ON', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
   ('ld_rule_bg_now',    39, 'BG_NOW',    'ld_pool_bg',      true, 'BG expired / no CED → British Gas', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
   ('ld_rule_ub_now',    20, 'UB_NOW',    'ld_pool_ub',      true, 'UB expired / no CED → Utility Bidder', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
-  ('ld_rule_other_now', 49, 'OTHER_NOW', 'ld_pool_other',   true, 'Other expired / no CED → Other', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ('ld_rule_other_now', 49, 'OTHER_NOW', 'ld_pool_other',   true, 'Unknown supplier expired / no CED → Other', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 ON CONFLICT (id) DO UPDATE
 SET
   priority = EXCLUDED.priority,
