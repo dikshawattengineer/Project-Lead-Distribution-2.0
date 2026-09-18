@@ -3,10 +3,14 @@
 # MAGIC # Step 1 — Working table
 # MAGIC
 # MAGIC Snapshot CRM tables, then one SQL builds `ld_working`.
-# MAGIC Tag order: **sticky first**, then Customer Care, Retention clock, then supplier
-# MAGIC (supplier apply **parked** — only **Retentions** + **Past Retentions** move).
+# MAGIC Tag order: **sticky first**, then Customer Care, Retention clock, then supplier.
+# MAGIC **Tagging** still computes `UPSELLING`, `UNASSIGNED`, `PRE_WINDOW`, `*_IN_WINDOW`
+# MAGIC (same as CRM Nightly) for QA — but **apply is parked**: only **Retentions**,
+# MAGIC **Past Retentions**, **Complaint**, **Callback** move tonight.
+# MAGIC When a company enters the retention window, tag flips → apply moves it.
+# MAGIC Supplier / Upselling / Unassigned **pool moves** resume on turn-on (`13_turn_on_supplier_routing.md`).
 # MAGIC
-# MAGIC Per-supplier pools / `09_sync` parked. Do not write **Unassigned** or supplier bags.
+# MAGIC Per-supplier pools / `09_sync` parked. `crm_provider_family` snapshot empty.
 # MAGIC Re-enable supplier + `crm_provider_family` when campaign routing is ready.
 # MAGIC
 # MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings`.
@@ -1276,8 +1280,8 @@ LEFT JOIN assigned a ON a.company_id = w.company_id
 # MAGIC %md
 # MAGIC ## Step 4 — Write pools, then apply
 # MAGIC
-# MAGIC Writes `ld_apply_batch` — **Retentions + Past Retentions** (+ complaint/callback).
-# MAGIC No Unassigned, supplier, Upselling, or Corporate moves until re-enabled.
+# MAGIC Writes `ld_apply_batch` — tags in `PARKED_APPLY_TAGS` only.
+# MAGIC Upselling / Unassigned tags exist on `ld_working` but are **not applied** while parked.
 # MAGIC Apply moves the pool and writes that parent on
 # MAGIC `company_pool_placements.sourcePoolId` (no ALTER on companies).
 # MAGIC Campaign on the company is `sourcePoolId` (parent before split). No campaigns upsert.
@@ -1285,6 +1289,16 @@ LEFT JOIN assigned a ON a.company_id = w.company_id
 # COMMAND ----------
 
 # DBTITLE 1,write shared pools then apply in CRM
+# While parked: only retention moves apply. Expand on turn-on (see 13_turn_on_supplier_routing.md).
+PARKED_APPLY_TAGS = (
+    "RETENTION",
+    "PAST_RETENTION",
+    "COMPLAINT",
+    "CALLBACK",
+)
+_PARKED_APPLY_TAGS_SQL = ", ".join(f"'{t}'" for t in PARKED_APPLY_TAGS)
+
+
 def _write_apply_batch(moves_df, label):
     n = moves_df.count()
     print(label, n)
@@ -1304,7 +1318,7 @@ def _write_apply_batch(moves_df, label):
 
 
 shared_moves = spark.sql(
-    """
+    f"""
     SELECT
       company_id,
       proposed_pool_id,
@@ -1312,14 +1326,14 @@ shared_moves = spark.sql(
     FROM crm_load.new_crm.ld_working
     WHERE proposed_pool_id IS NOT NULL
       AND parent_pool_id IS NOT NULL
-      AND lead_tag IN ('RETENTION', 'PAST_RETENTION', 'COMPLAINT', 'CALLBACK')
+      AND lead_tag IN ({_PARKED_APPLY_TAGS_SQL})
       AND (
         COALESCE(is_protected, false) = false
         OR lead_tag IN ('COMPLAINT', 'CALLBACK')
       )
     """
 )
-_write_apply_batch(shared_moves, "retention + past retention (+ sticky) only")
+_write_apply_batch(shared_moves, f"parked apply only: {', '.join(PARKED_APPLY_TAGS)}")
 
 _applied = pg_query("SELECT public.ld_apply_batch_run() AS companies_moved")
 print("apply companies_moved", _applied.collect()[0]["companies_moved"])

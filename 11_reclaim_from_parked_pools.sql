@@ -1,5 +1,6 @@
 -- One-time (safe to re-run): pull companies OUT of parked shared pools
--- (supplier, Unassigned, Upselling, …) back into Retentions / Past Retentions.
+-- (supplier, Unassigned, Upselling, …) into Retentions or Past Retentions only.
+-- Far-future CED (541+ days) stays put — Unassigned apply is off while parked.
 -- Only companies with a past sale (deals or crm_company_load_sale).
 -- PRIVATE agent pools are not touched. Run after 10_park_supplier_routing.sql.
 -- Then run Databricks to refresh placements / audits.
@@ -57,7 +58,7 @@ SELECT
   c.id AS company_id,
   CASE
     WHEN ced.days_left BETWEEN 1 AND 540 THEN pr.id
-    ELSE po.id
+    WHEN ced.days_left IS NULL OR ced.days_left < 1 THEN po.id
   END AS target_pool_id
 FROM public.companies c
 JOIN ld_parked_pool pk ON pk.pool_id = c."poolId"
@@ -65,10 +66,14 @@ JOIN ld_past_sale_co ps ON ps.company_id = c.id
 LEFT JOIN ld_contract_ced ced ON ced.company_id = c.id
 JOIN public.pools pr ON pr.code = 'RETENTION'
 JOIN public.pools po ON po.code = 'PAST_RETENTION'
-WHERE c."poolId" IS DISTINCT FROM CASE
-  WHEN ced.days_left BETWEEN 1 AND 540 THEN pr.id
-  ELSE po.id
-END;
+WHERE CASE
+    WHEN ced.days_left BETWEEN 1 AND 540 THEN pr.id
+    WHEN ced.days_left IS NULL OR ced.days_left < 1 THEN po.id
+  END IS NOT NULL
+  AND c."poolId" IS DISTINCT FROM CASE
+    WHEN ced.days_left BETWEEN 1 AND 540 THEN pr.id
+    WHEN ced.days_left IS NULL OR ced.days_left < 1 THEN po.id
+  END;
 
 UPDATE public.companies c
 SET "poolId" = t.target_pool_id,
@@ -76,8 +81,9 @@ SET "poolId" = t.target_pool_id,
 FROM ld_reclaim_target t
 WHERE c.id = t.company_id;
 
-COMMIT;
-
+-- Summary must run before COMMIT (temp tables use ON COMMIT DROP).
 SELECT
   (SELECT COUNT(*) FROM ld_parked_pool) AS parked_shared_pools,
   (SELECT COUNT(*) FROM ld_reclaim_target) AS companies_reclaimed;
+
+COMMIT;
