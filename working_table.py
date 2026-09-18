@@ -3,14 +3,11 @@
 # MAGIC # Step 1 — Working table
 # MAGIC
 # MAGIC Snapshot CRM tables, then one SQL builds `ld_working`.
-# MAGIC Tag order: **sticky first**, then Customer Care (7–60 days since sale),
-# MAGIC then Retention clock, then Corporate (21–200), then supplier.
+# MAGIC Tag order: **sticky first**, then Customer Care, Retention clock, then supplier
+# MAGIC (supplier apply **parked** — only **Retentions** + **Past Retentions** move).
 # MAGIC
-# MAGIC Only **E.ON** has a DFV pool (`ld_pool_eon_dfv`): **contract type**
-# MAGIC deemed/flexible/variable only (Nightly FVD). Past due / no CED → main E.ON.
-# MAGIC Supplier tags come from `crm_provider_family` (sync `09_sync_provider_pools.sql`):
-# MAGIC each known provider → own pool (name = displayName), except shared BG / E.ON / UB.
-# MAGIC BG (not Lite) window 548; everyone else 365. Unknown provider → Other.
+# MAGIC Per-supplier pools / `09_sync` parked. Do not write **Unassigned** or supplier bags.
+# MAGIC Re-enable supplier + `crm_provider_family` when campaign routing is ready.
 # MAGIC
 # MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings`.
 # MAGIC Load origin is the **`campaign` column** (Retention / Supplier) — that is
@@ -104,21 +101,23 @@ for table in [
     df.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(dest)
     print(table, df.count())
 
-try:
-    _fam = jdbc_table("public.crm_provider_family")
-    _fam.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_crm_provider_family"
-    )
-    print("crm_provider_family", _fam.count())
-except Exception as exc:
-    print("crm_provider_family skip — run 09_sync_provider_pools.sql first:", str(exc)[:200])
-    spark.createDataFrame(
-        [],
-        "providerId string, family string, tagCode string, poolId string, "
-        "windowDays int, displayName string, isActive boolean",
-    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_crm_provider_family"
-    )
+# Parked — re-enable with 09_sync_provider_pools.sql when supplier pools go live.
+# try:
+#     _fam = jdbc_table("public.crm_provider_family")
+#     _fam.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+#         "crm_load.new_crm.snap_crm_provider_family"
+#     )
+#     print("crm_provider_family", _fam.count())
+# except Exception as exc:
+#     print("crm_provider_family skip:", str(exc)[:200])
+spark.createDataFrame(
+    [],
+    "providerId string, family string, tagCode string, poolId string, "
+    "windowDays int, displayName string, isActive boolean",
+).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
+    "crm_load.new_crm.snap_crm_provider_family"
+)
+print("crm_provider_family parked (empty snapshot)")
 
 try:
     sale = jdbc_table("public.crm_company_load_sale")
@@ -1007,7 +1006,8 @@ print("crm_pool_rule", _rules.count())
 # MAGIC     WHEN w.lead_tag = 'CALLBACK' THEN COALESCE(w.callback_owner_pool_id, w.current_pool_id)
 # MAGIC     WHEN w.lead_tag = 'LOCKED' THEN w.current_pool_id
 # MAGIC     WHEN COALESCE(w.is_protected, false) AND w.lead_tag <> 'COMPLAINT' THEN w.current_pool_id
-# MAGIC     ELSE COALESCE(r.`poolId`, upool.pool_id)
+# MAGIC     WHEN w.lead_tag IN ('RETENTION', 'PAST_RETENTION') THEN r.`poolId`
+# MAGIC     ELSE CAST(NULL AS STRING)
 # MAGIC   END AS proposed_pool_id,
 # MAGIC   w.site_count,
 # MAGIC   w.win_provider_id,
@@ -1046,7 +1046,6 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   ON r.tag = w.lead_tag
 # MAGIC  AND COALESCE(r.`isActive`, true) = true
 # MAGIC LEFT JOIN crm_load.new_crm.ld_pool_by_code cpool ON cpool.code = 'COMPLAINT'
-# MAGIC LEFT JOIN crm_load.new_crm.ld_pool_by_code upool ON upool.code = 'UNASSIGNED'
 # MAGIC ;
 
 # COMMAND ----------
@@ -1277,8 +1276,8 @@ LEFT JOIN assigned a ON a.company_id = w.company_id
 # MAGIC %md
 # MAGIC ## Step 4 — Write pools, then apply
 # MAGIC
-# MAGIC Writes `ld_apply_batch` (shared STANDARD / CAMPAIGN parent only).
-# MAGIC `proposed_campaign_id` = same parent (Retention / E.ON / …).
+# MAGIC Writes `ld_apply_batch` — **Retentions + Past Retentions** (+ complaint/callback).
+# MAGIC No Unassigned, supplier, Upselling, or Corporate moves until re-enabled.
 # MAGIC Apply moves the pool and writes that parent on
 # MAGIC `company_pool_placements.sourcePoolId` (no ALTER on companies).
 # MAGIC Campaign on the company is `sourcePoolId` (parent before split). No campaigns upsert.
@@ -1313,13 +1312,14 @@ shared_moves = spark.sql(
     FROM crm_load.new_crm.ld_working
     WHERE proposed_pool_id IS NOT NULL
       AND parent_pool_id IS NOT NULL
+      AND lead_tag IN ('RETENTION', 'PAST_RETENTION', 'COMPLAINT', 'CALLBACK')
       AND (
         COALESCE(is_protected, false) = false
         OR lead_tag IN ('COMPLAINT', 'CALLBACK')
       )
     """
 )
-_write_apply_batch(shared_moves, "pool + campaign rows (shared parent only)")
+_write_apply_batch(shared_moves, "retention + past retention (+ sticky) only")
 
 _applied = pg_query("SELECT public.ld_apply_batch_run() AS companies_moved")
 print("apply companies_moved", _applied.collect()[0]["companies_moved"])

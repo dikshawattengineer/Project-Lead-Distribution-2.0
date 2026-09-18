@@ -3,7 +3,8 @@
 -- the boss / app migrate first. Then run these files IN ORDER in Supabase:
 --
 --   1) 04_seed_ld_pools.sql             core pools (UUID id, code key) + tag rules
---   2) 09_sync_provider_pools.sql       providers → per-supplier pools + family map
+--   2) 09_sync_provider_pools.sql       OPTIONAL — parked until supplier/campaign on
+--   2b) 10_park_supplier_routing.sql   deactivate supplier rules + provider family
 --   4) 02_split_schema.sql              policy / member / filter (unused while
 --      apply stops at STANDARD shared pools)
 --   5) apply_ld_apply_batch.sql         ld_apply_batch + ld_apply_batch_run()
