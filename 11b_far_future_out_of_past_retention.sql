@@ -1,68 +1,68 @@
--- One-time fix: old 11_reclaim put far-future CED (541+ days) into Past Retentions.
--- While parked: park them in Upselling (hidden from agents via script 12).
--- Nightly tags UPSELLING but apply does not write that pool — they stay put.
--- Safe to re-run. Does not touch Retention window (1–540) or truly expired CED.
-
-BEGIN;
-
-CREATE TEMP TABLE ld_contract_ced ON COMMIT DROP AS
-SELECT DISTINCT ON (company_id)
-  company_id,
-  end_date,
-  (end_date - CURRENT_DATE) AS days_left
-FROM (
-  SELECT NULLIF(BTRIM(c."companyId"), '') AS company_id, c."endDate"::date AS end_date
-  FROM public.contracts c
-  WHERE c."endDate" IS NOT NULL AND NULLIF(BTRIM(c."companyId"), '') IS NOT NULL
-  UNION ALL
-  SELECT s."companyId", c."endDate"::date
-  FROM public.contracts c
-  JOIN public.company_sites s ON s.id = c."siteId"
-  WHERE c."endDate" IS NOT NULL AND s."companyId" IS NOT NULL
-  UNION ALL
-  SELECT s."companyId", c."endDate"::date
-  FROM public.contracts c
-  JOIN public.site_meters sm ON sm.id = c."siteMeterId"
-  JOIN public.company_sites s ON s.id = sm."companySiteId"
-  WHERE c."endDate" IS NOT NULL AND s."companyId" IS NOT NULL
-) x
-WHERE company_id IS NOT NULL
-ORDER BY
-  company_id,
-  CASE
-    WHEN end_date > CURRENT_DATE AND (end_date - CURRENT_DATE) <= 540 THEN 0
-    WHEN end_date <= CURRENT_DATE THEN 1
-    ELSE 2
-  END,
-  end_date DESC NULLS LAST;
-
-CREATE TEMP TABLE ld_far_future_misfiled ON COMMIT DROP AS
-SELECT
-  c.id AS company_id,
-  c.name,
-  ced.end_date,
-  ced.days_left
-FROM public.companies c
-JOIN public.pools p ON p.id = c."poolId"
-JOIN ld_contract_ced ced ON ced.company_id = c.id
-WHERE p.code = 'PAST_RETENTION'
-  AND ced.days_left > 540;
-
-SELECT COUNT(*) AS companies_to_move FROM ld_far_future_misfiled;
-
-SELECT company_id, name, end_date, days_left
-FROM ld_far_future_misfiled
-ORDER BY name
-LIMIT 50;
-
-UPDATE public.companies c
-SET
-  "poolId" = (SELECT id FROM public.pools WHERE code = 'UPSELLING' LIMIT 1),
-  "updatedAt" = CURRENT_TIMESTAMP
-FROM ld_far_future_misfiled t
-WHERE c.id = t.company_id;
-
-SELECT COUNT(*) AS moved_to_upselling FROM ld_far_future_misfiled;
-
-COMMIT;
-
+-- One-time fix: old 11_reclaim put far-future CED (541+ days) into Past Retentions.
+-- Move those → Unassigned (holding pool while parked). Nightly tags UPSELLING
+-- but apply does not write Unassigned — pool stays put until turn-on.
+-- Safe to re-run. Does not touch Retention window (1–540) or truly expired CED.
+-- Then run 11c to clear Unassigned from pool_profiles (no manager profile changes).
+
+BEGIN;
+
+CREATE TEMP TABLE ld_contract_ced ON COMMIT DROP AS
+SELECT DISTINCT ON (company_id)
+  company_id,
+  end_date,
+  (end_date - CURRENT_DATE) AS days_left
+FROM (
+  SELECT NULLIF(BTRIM(c."companyId"), '') AS company_id, c."endDate"::date AS end_date
+  FROM public.contracts c
+  WHERE c."endDate" IS NOT NULL AND NULLIF(BTRIM(c."companyId"), '') IS NOT NULL
+  UNION ALL
+  SELECT s."companyId", c."endDate"::date
+  FROM public.contracts c
+  JOIN public.company_sites s ON s.id = c."siteId"
+  WHERE c."endDate" IS NOT NULL AND s."companyId" IS NOT NULL
+  UNION ALL
+  SELECT s."companyId", c."endDate"::date
+  FROM public.contracts c
+  JOIN public.site_meters sm ON sm.id = c."siteMeterId"
+  JOIN public.company_sites s ON s.id = sm."companySiteId"
+  WHERE c."endDate" IS NOT NULL AND s."companyId" IS NOT NULL
+) x
+WHERE company_id IS NOT NULL
+ORDER BY
+  company_id,
+  CASE
+    WHEN end_date > CURRENT_DATE AND (end_date - CURRENT_DATE) <= 540 THEN 0
+    WHEN end_date <= CURRENT_DATE THEN 1
+    ELSE 2
+  END,
+  end_date DESC NULLS LAST;
+
+CREATE TEMP TABLE ld_far_future_misfiled ON COMMIT DROP AS
+SELECT
+  c.id AS company_id,
+  c.name,
+  ced.end_date,
+  ced.days_left
+FROM public.companies c
+JOIN public.pools p ON p.id = c."poolId"
+JOIN ld_contract_ced ced ON ced.company_id = c.id
+WHERE p.code = 'PAST_RETENTION'
+  AND ced.days_left > 540;
+
+SELECT COUNT(*) AS companies_to_move FROM ld_far_future_misfiled;
+
+SELECT company_id, name, end_date, days_left
+FROM ld_far_future_misfiled
+ORDER BY name
+LIMIT 50;
+
+UPDATE public.companies c
+SET
+  "poolId" = (SELECT id FROM public.pools WHERE code = 'UNASSIGNED' LIMIT 1),
+  "updatedAt" = CURRENT_TIMESTAMP
+FROM ld_far_future_misfiled t
+WHERE c.id = t.company_id;
+
+SELECT COUNT(*) AS moved_to_unassigned FROM ld_far_future_misfiled;
+
+COMMIT;
