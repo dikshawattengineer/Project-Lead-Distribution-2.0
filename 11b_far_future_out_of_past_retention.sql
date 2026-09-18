@@ -1,8 +1,8 @@
 -- One-time fix: old 11_reclaim put far-future CED (541+ days) into Past Retentions.
--- Move those → Unassigned (holding pool while parked). Nightly tags UPSELLING
--- but apply does not write Unassigned — pool stays put until turn-on.
+-- Move those → Unassigned (holding pool while parked).
+-- "Clear" = nightly does NOT write Unassigned (parked apply) — no profile changes.
+-- Tags UPSELLING for QA only; pool stays put until turn-on.
 -- Safe to re-run. Does not touch Retention window (1–540) or truly expired CED.
--- Then run 11c to clear Unassigned from pool_profiles (no manager profile changes).
 
 BEGIN;
 

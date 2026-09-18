@@ -1,5 +1,8 @@
 # Turn supplier routing back on
 
+> **Step-by-step (new supplier + turn-on):** see **`NEW_SUPPLIER_AND_TURN_ON.md`**  
+> **Release / fallback migration:** see **`RELEASE_MIGRATION.md`**
+
 Use this when boss is ready for **per-supplier pools**, **Unassigned**, and **campaign** routing again.
 
 **Current state (parked):** nightly only moves **Retentions**, **Past Retentions**, **Complaint**, **Callback**. Supplier sync (`09`) and `crm_provider_family` are off. Agent **PRIVATE** pools unchanged.
@@ -36,16 +39,7 @@ WHERE COALESCE("isManual", false) = false;
 UPDATE public.crm_pool_rule
 SET "isActive" = true,
     "updatedAt" = CURRENT_TIMESTAMP
-WHERE id IN (
-  'ld_rule_ub_now', 'ld_rule_ub_in',
-  'ld_rule_eon_dfv', 'ld_rule_eon_now', 'ld_rule_eon_in',
-  'ld_rule_bg_now', 'ld_rule_bg_in',
-  'ld_rule_other_now', 'ld_rule_other_in',
-  'ld_rule_pre', 'ld_rule_fallback',
-  'ld_rule_upsell', 'ld_rule_customer_care', 'ld_rule_corporate'
-)
-OR id LIKE 'ld_rule_%_now'
-OR id LIKE 'ld_rule_%_in';
+WHERE tag NOT IN ('COMPLAINT', 'CALLBACK', 'RETENTION', 'PAST_RETENTION');
 
 COMMIT;
 ```
@@ -98,13 +92,20 @@ instead of `ELSE NULL` for non-retention tags.
 
 ## Agent visibility (`pool_profiles`)
 
-After parking, agents only see **Retentions**, **Past Retentions**, **PRIVATE** bags; managers see **Complaint**.
+**Watt CRM (parked state) — run `12_hide_parked_pools_from_agents.sql`** after 10 + 11.
+
+| Pool | Pool filter while parked | Needs `pool_profiles`? |
+|------|--------------------------|-------------------------|
+| **PRIVATE** agent bags | Always (CRM) | No |
+| **RETENTION** / **PAST_RETENTION** | Always (shared) | No |
+| **COMPLAINT** | Managers | No |
+| **Supplier** / **Unassigned** / **Upselling** | Hidden (12 removes links) | Restored when 09 is on |
 
 When suppliers go live:
 
 - [ ] Add `pool_profiles` rows so agents can open each **supplier shared pool** they work.
 - [ ] Keep **Unassigned** off agent profiles unless you want them to see waiters.
-- [ ] Managers keep **Complaint** only.
+- [ ] Do **not** use `pool_profiles` to hide Retention or private bags.
 
 ---
 

@@ -1,8 +1,13 @@
 -- Sync every providers row → routing map + pool (UUID) + NOW/IN_WINDOW rules.
 -- pools.id = gen_random_uuid(); pools.code = stable key (BG, YU_ENERGY, …).
+-- crm_pool_rule.id = uuid; upsert key = tag (e.g. YU_ENERGY_NOW). Run 06 first on existing DBs.
 -- Run after 04_seed_ld_pools.sql. Safe to re-run. Does not change companies.poolId.
+-- Skip while parked — update now so turn-on day is ready.
 
 BEGIN;
+
+CREATE UNIQUE INDEX IF NOT EXISTS crm_pool_rule_tag_uidx
+  ON public.crm_pool_rule (tag);
 
 CREATE TABLE IF NOT EXISTS public.crm_provider_family (
   "providerId"   text PRIMARY KEY
@@ -232,7 +237,7 @@ numbered AS (
 INSERT INTO public.crm_pool_rule
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 SELECT
-  'ld_rule_' || LOWER(n.tag_code) || '_now',
+  gen_random_uuid(),
   n.pri_now,
   n.tag_code || '_NOW',
   p.id,
@@ -243,9 +248,8 @@ SELECT
   CURRENT_TIMESTAMP
 FROM numbered n
 JOIN public.pools p ON p.code = n.pool_code
-ON CONFLICT (id) DO UPDATE SET
+ON CONFLICT (tag) DO UPDATE SET
   priority = EXCLUDED.priority,
-  tag = EXCLUDED.tag,
   "poolId" = EXCLUDED."poolId",
   "isActive" = true,
   description = EXCLUDED.description,
@@ -263,7 +267,7 @@ numbered AS (
 INSERT INTO public.crm_pool_rule
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 SELECT
-  'ld_rule_' || LOWER(n.tag_code) || '_in',
+  gen_random_uuid(),
   n.pri_in,
   n.tag_code || '_IN_WINDOW',
   p.id,
@@ -274,9 +278,8 @@ SELECT
   CURRENT_TIMESTAMP
 FROM numbered n
 JOIN public.pools p ON p.code = n.pool_code
-ON CONFLICT (id) DO UPDATE SET
+ON CONFLICT (tag) DO UPDATE SET
   priority = EXCLUDED.priority,
-  tag = EXCLUDED.tag,
   "poolId" = EXCLUDED."poolId",
   "isActive" = true,
   description = EXCLUDED.description,
@@ -291,5 +294,8 @@ ORDER BY providers DESC;
 SELECT COUNT(*) AS supplier_now_rules
 FROM public.crm_pool_rule
 WHERE tag LIKE '%_NOW'
-  AND "isActive" = true
-  AND id LIKE 'ld_rule_%';
+  AND tag NOT IN (
+    'EON_NOW', 'BG_NOW', 'UB_NOW', 'OTHER_NOW',
+    'EON_IN_WINDOW', 'BG_IN_WINDOW', 'UB_IN_WINDOW', 'OTHER_IN_WINDOW'
+  )
+  AND "isActive" = true;

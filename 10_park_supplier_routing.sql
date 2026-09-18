@@ -8,15 +8,12 @@ BEGIN;
 UPDATE public.crm_pool_rule
 SET "isActive" = false,
     "updatedAt" = CURRENT_TIMESTAMP
-WHERE tag NOT IN ('COMPLAINT', 'CALLBACK', 'RETENTION', 'PAST_RETENTION')
-   OR id LIKE 'ld_rule_%_now'
-   OR id LIKE 'ld_rule_%_in';
+WHERE tag NOT IN ('COMPLAINT', 'CALLBACK', 'RETENTION', 'PAST_RETENTION');
 
 UPDATE public.crm_pool_rule
 SET "isActive" = true,
     "updatedAt" = CURRENT_TIMESTAMP
-WHERE tag IN ('COMPLAINT', 'RETENTION', 'PAST_RETENTION')
-  AND id IN ('ld_rule_complaint', 'ld_rule_ret', 'ld_rule_past_ret');
+WHERE tag IN ('COMPLAINT', 'RETENTION', 'PAST_RETENTION');
 
 UPDATE public.crm_provider_family
 SET "isActive" = false,

@@ -1,11 +1,13 @@
--- Lookup of load codes + stamp on companies.
--- Safe to re-run. Does not change poolId or tagging.
--- Add more codes anytime with INSERT (see bottom). CRM Load uses id as the widget.
+-- Load source lookup + stamp on company_sites (not companies).
+-- Safe to re-run. Does not change companies.poolId.
+-- Nightly still assigns the pool on companies; it rolls site sources up.
+--
+-- If you already ran the old companies.loadSourceId version, this moves it.
 
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS public.crm_load_source (
-  id              text PRIMARY KEY,          -- widget value: eon_supplier, retention, …
+  id              text PRIMARY KEY,
   name            text NOT NULL,
   kind            text NOT NULL
     CHECK (kind IN ('SUPPLIER', 'RETENTION')),
@@ -18,33 +20,38 @@ CREATE TABLE IF NOT EXISTS public.crm_load_source (
 
 INSERT INTO public.crm_load_source (id, name, kind, family)
 VALUES
-  ('eon_supplier',   'E.ON supplier file',     'SUPPLIER',  'EON'),
-  ('bg_supplier',    'British Gas supplier file', 'SUPPLIER', 'BG'),
-  ('ub_supplier',    'Utility Bidder supplier file', 'SUPPLIER', 'UB'),
-  ('other_supplier', 'Other supplier file',    'SUPPLIER',  'OTHER'),
-  ('retention',      'Retention / Watt-sold file', 'RETENTION', NULL)
+  ('eon_supplier',   'E.ON supplier file',           'SUPPLIER',  'EON'),
+  ('bg_supplier',    'British Gas supplier file',    'SUPPLIER',  'BG'),
+  ('ub_supplier',    'Utility Bidder supplier file', 'SUPPLIER',  'UB'),
+  ('other_supplier', 'Other supplier file',          'SUPPLIER',  'OTHER'),
+  ('retention',      'Retention / Watt-sold file',   'RETENTION', NULL)
 ON CONFLICT (id) DO UPDATE SET
   name = EXCLUDED.name,
   kind = EXCLUDED.kind,
   family = EXCLUDED.family,
   "updatedAt" = CURRENT_TIMESTAMP;
 
-ALTER TABLE public.companies
+ALTER TABLE public.company_sites
   ADD COLUMN IF NOT EXISTS "loadSourceId" text
     REFERENCES public.crm_load_source(id);
 
-ALTER TABLE public.companies
+ALTER TABLE public.company_sites
   ADD COLUMN IF NOT EXISTS "loadSourceAt" timestamp without time zone;
 
-CREATE INDEX IF NOT EXISTS companies_load_source_idx
-  ON public.companies ("loadSourceId");
+CREATE INDEX IF NOT EXISTS company_sites_load_source_idx
+  ON public.company_sites ("loadSourceId");
+
+-- Drop the company-level stamp if the earlier script was run.
+ALTER TABLE public.companies
+  DROP COLUMN IF EXISTS "loadSourceAt";
+
+ALTER TABLE public.companies
+  DROP COLUMN IF EXISTS "loadSourceId";
 
 COMMIT;
 
--- Checks
 -- SELECT * FROM public.crm_load_source ORDER BY kind, id;
--- SELECT id, "loadSourceId", "loadSourceAt" FROM public.companies LIMIT 20;
+-- SELECT id, "companyId", "loadSourceId", "loadSourceAt" FROM public.company_sites LIMIT 20;
 
--- Add a new code later (then use that id on the CRM Load job):
 -- INSERT INTO public.crm_load_source (id, name, kind, family)
 -- VALUES ('yu_supplier', 'Yu Energy supplier file', 'SUPPLIER', 'OTHER');

@@ -2,11 +2,14 @@
 -- Prisma/CRM tables (companies, pools, profiles, contracts, …) come from
 -- the boss / app migrate first. Then run these files IN ORDER in Supabase:
 --
+--   0) Boss Prisma migrate, then 06_crm_pool_rule_uuid.sql (existing DBs with ld_rule_* ids)
 --   1) 04_seed_ld_pools.sql             core pools (UUID id, code key) + tag rules
 --   2) 09_sync_provider_pools.sql       OPTIONAL — parked until supplier/campaign on
 --   2b) 10_park_supplier_routing.sql   deactivate supplier rules + provider family
 --   2c) 11_reclaim_from_parked_pools.sql  move past-sale cos out of supplier/Unassigned
---   2d) 12_hide_parked_pools_from_agents.sql  agents: Retention + agent bags; managers: + Complaint
+--   2d) 12_hide_parked_pools_from_agents.sql  drop supplier/Unassigned/Upselling from Pool filter
+--       Fix PRIVATE one-owner links: 12a_fix_private_one_owner.sql
+--       Undo supplier links: 12_revert_hide_parked_pools.sql
 --   Turn supplier back on: see 13_turn_on_supplier_routing.md
 --   4) 02_split_schema.sql              policy / member / filter (unused while
 --      apply stops at STANDARD shared pools)
@@ -42,4 +45,9 @@
 --   COMPLAINT, RETENTION, PAST_RETENTION, UPSELLING, CUSTOMER_CARE, CORPORATE
 --   (+ per-supplier codes from 09). pools.id = UUID v4.
 
-SELECT 'See comments: run 04 → 09 → apply → 24' AS rebuild_order;
+-- Guides:
+--   PARKED_STATE.md              — current parked nightly
+--   RELEASE_MIGRATION.md         — release: 16 fallback + functions + park
+--   NEW_SUPPLIER_AND_TURN_ON.md  — new provider + supplier turn-on
+
+SELECT 'See PARKED_STATE.md, RELEASE_MIGRATION.md, NEW_SUPPLIER_AND_TURN_ON.md' AS rebuild_order;

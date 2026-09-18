@@ -1,6 +1,6 @@
 -- Lead distribution shared pools: id = UUID v4, code = stable key.
 -- Run once on a fresh DB (or after removing old ld_pool_* rows).
--- Safe to re-run (upsert on pools.code, crm_pool_rule.id).
+-- Safe to re-run (upsert on pools.code, crm_pool_rule.tag).
 
 BEGIN;
 
@@ -11,6 +11,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS pools_code_uidx
 DROP INDEX IF EXISTS public.crm_pool_rule_priority_uidx;
 CREATE INDEX IF NOT EXISTS crm_pool_rule_priority_idx
   ON public.crm_pool_rule (priority);
+
+CREATE UNIQUE INDEX IF NOT EXISTS crm_pool_rule_tag_uidx
+  ON public.crm_pool_rule (tag);
 
 INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
 SELECT
@@ -45,7 +48,7 @@ ON CONFLICT (code) DO UPDATE SET
 INSERT INTO public.crm_pool_rule
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 SELECT
-  v.rule_id,
+  gen_random_uuid(),
   v.priority,
   v.tag,
   p.id,
@@ -56,30 +59,28 @@ SELECT
   CURRENT_TIMESTAMP
 FROM (
   VALUES
-    ('ld_rule_complaint',     10, 'COMPLAINT',        'COMPLAINT',      'Ongoing complaint — locked Complaint pool'),
-    ('ld_rule_customer_care', 11, 'CUSTOMER_CARE',    'CUSTOMER_CARE',  'Past sale, 7–60 days since last sale'),
-    ('ld_rule_past_ret',      12, 'PAST_RETENTION',   'PAST_RETENTION', 'Any past deal, OOC'),
-    ('ld_rule_ret',           13, 'RETENTION',        'RETENTION',      'Any past deal, 1–540 days'),
-    ('ld_rule_upsell',        14, 'UPSELLING',        'UPSELLING',      'Any past deal, >540 days'),
-    ('ld_rule_corporate',     15, 'CORPORATE',        'CORPORATE',      '21–200 sites, DFV or CED ≤365'),
-    ('ld_rule_ub_now',        20, 'UB_NOW',           'UB',             'UB expired / no CED'),
-    ('ld_rule_ub_in',         21, 'UB_IN_WINDOW',     'UB',             'UB in window 1–365'),
-    ('ld_rule_eon_dfv',       28, 'EON_DFV',          'EON_DFV',        'E.ON deemed / flexible / variable only'),
-    ('ld_rule_eon_now',       29, 'EON_NOW',          'EON',            'E.ON expired / no CED → main E.ON'),
-    ('ld_rule_eon_in',        30, 'EON_IN_WINDOW',    'EON',            'E.ON in window 1–365'),
-    ('ld_rule_bg_now',        39, 'BG_NOW',           'BG',             'British Gas expired / no CED'),
-    ('ld_rule_bg_in',         40, 'BG_IN_WINDOW',     'BG',             'British Gas in window 1–548'),
-    ('ld_rule_other_now',     49, 'OTHER_NOW',        'OTHER',          'Unknown supplier expired / no CED'),
-    ('ld_rule_other_in',      50, 'OTHER_IN_WINDOW',  'OTHER',          'Unknown supplier in window'),
-    ('ld_rule_pre',           90, 'PRE_WINDOW',       'UNASSIGNED',     'Wait — too far out'),
-    ('ld_rule_fallback',      99, 'UNASSIGNED',       'UNASSIGNED',     'Fallback')
-) AS v(rule_id, priority, tag, pool_code, description)
+    (10, 'COMPLAINT',        'COMPLAINT',      'Ongoing complaint — locked Complaint pool'),
+    (11, 'CUSTOMER_CARE',    'CUSTOMER_CARE',  'Past sale, 7–60 days since last sale'),
+    (12, 'PAST_RETENTION',   'PAST_RETENTION', 'Any past deal, OOC'),
+    (13, 'RETENTION',        'RETENTION',      'Any past deal, 1–540 days'),
+    (14, 'UPSELLING',        'UPSELLING',      'Any past deal, >540 days'),
+    (15, 'CORPORATE',        'CORPORATE',      '21–200 sites, DFV or CED ≤365'),
+    (20, 'UB_NOW',           'UB',             'UB expired / no CED'),
+    (21, 'UB_IN_WINDOW',     'UB',             'UB in window 1–365'),
+    (28, 'EON_DFV',          'EON_DFV',        'E.ON deemed / flexible / variable only'),
+    (29, 'EON_NOW',          'EON',            'E.ON expired / no CED → main E.ON'),
+    (30, 'EON_IN_WINDOW',    'EON',            'E.ON in window 1–365'),
+    (39, 'BG_NOW',           'BG',             'British Gas expired / no CED'),
+    (40, 'BG_IN_WINDOW',     'BG',             'British Gas in window 1–548'),
+    (49, 'OTHER_NOW',        'OTHER',          'Unknown supplier expired / no CED'),
+    (50, 'OTHER_IN_WINDOW',  'OTHER',          'Unknown supplier in window'),
+    (90, 'PRE_WINDOW',       'UNASSIGNED',     'Wait — too far out'),
+    (99, 'UNASSIGNED',       'UNASSIGNED',     'Fallback')
+) AS v(priority, tag, pool_code, description)
 JOIN public.pools p ON p.code = v.pool_code
-ON CONFLICT (id) DO UPDATE SET
+ON CONFLICT (tag) DO UPDATE SET
   priority = EXCLUDED.priority,
-  tag = EXCLUDED.tag,
   "poolId" = EXCLUDED."poolId",
-  "isActive" = EXCLUDED."isActive",
   description = EXCLUDED.description,
   "updatedAt" = CURRENT_TIMESTAMP;
 
