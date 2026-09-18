@@ -38,6 +38,7 @@ Databricks working_table.py (Run all)
 | — | `09_sync_provider_pools.sql` | **SKIP while parked** (script updated for turn-on day) |
 | 2 | `10_park_supplier_routing.sql` | Deactivate supplier rules + `crm_provider_family` |
 | 3 | `11_reclaim_from_parked_pools.sql` | Past-sale cos in parked pools → Retention (1–540) or Past Retention (expired only); far-future left alone |
+| 3b | `11b_far_future_out_of_past_retention.sql` | **If old 11 ran:** move 541+ CED cos out of Past Retentions → Unassigned |
 | 4 | `12_hide_parked_pools_from_agents.sql` | Hide supplier/Unassigned/Upselling from Pool filter |
 | 4b | `12a_fix_private_one_owner.sql` | If private bags had extra `pool_profiles` links |
 | 5 | `apply_ld_apply_batch.sql` | `ld_apply_batch` + `ld_apply_batch_run()` |
