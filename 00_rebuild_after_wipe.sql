@@ -7,6 +7,7 @@
 --   2b) 10_park_supplier_routing.sql   deactivate supplier rules + provider family
 --   2c) 11_reclaim_from_parked_pools.sql  move past-sale cos out of supplier/Unassigned
 --   2d) 12_hide_parked_pools_from_agents.sql  agents: Retention + agent bags; managers: + Complaint
+--   Turn supplier back on: see 13_turn_on_supplier_routing.md
 --   4) 02_split_schema.sql              policy / member / filter (unused while
 --      apply stops at STANDARD shared pools)
 --   5) apply_ld_apply_batch.sql         ld_apply_batch + ld_apply_batch_run()
