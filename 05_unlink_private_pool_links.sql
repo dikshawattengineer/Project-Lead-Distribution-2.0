@@ -1,6 +1,6 @@
 -- Turn off fair-share: unlink STANDARD/CAMPAIGN parents from PRIVATE agent bags.
 -- Does not delete PRIVATE pools or move companies — next Databricks apply moves
--- non-sticky companies onto the shared parent from crm_pool_rule.
+-- non-sticky companies onto the shared parent from pool_rules.
 -- Safe to re-run. Re-create links in CRM when fair-share is turned back on.
 
 BEGIN;

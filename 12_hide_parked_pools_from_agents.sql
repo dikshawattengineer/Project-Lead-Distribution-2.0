@@ -5,9 +5,10 @@
 -- parents in pool_links. Removing supplier pool_profiles hid the parent → child vanished too.
 -- Fix: (1) turn off pool_links, (2) direct owner → own PRIVATE bag, (3) unlink STANDARD suppliers.
 --
--- Unlinks from pool_profiles (pools stay in DB):
---   • Every pool from 09_sync_provider_pools.sql + 04 supplier bags + UNASSIGNED + UPSELLING
--- Keeps: RETENTION, PAST_RETENTION, each agent's own PRIVATE bag, COMPLAINT (managers).
+-- Unlinks from pool_profiles for AGENTS only (pools stay in DB):
+--   • Supplier / UNASSIGNED / UPSELLING / other parked shared pools
+-- Agents keep: RETENTION, PAST_RETENTION, own PRIVATE bag.
+-- Managers / admins keep FULL visibility — all STANDARD + CAMPAIGN pools linked.
 
 BEGIN;
 

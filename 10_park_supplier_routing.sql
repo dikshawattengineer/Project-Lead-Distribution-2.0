@@ -5,17 +5,17 @@
 
 BEGIN;
 
-UPDATE public.crm_pool_rule
+UPDATE public.pool_rules
 SET "isActive" = false,
     "updatedAt" = CURRENT_TIMESTAMP
 WHERE tag NOT IN ('COMPLAINT', 'CALLBACK', 'RETENTION', 'PAST_RETENTION');
 
-UPDATE public.crm_pool_rule
+UPDATE public.pool_rules
 SET "isActive" = true,
     "updatedAt" = CURRENT_TIMESTAMP
 WHERE tag IN ('COMPLAINT', 'RETENTION', 'PAST_RETENTION');
 
-UPDATE public.crm_provider_family
+UPDATE public.provider_families
 SET "isActive" = false,
     "updatedAt" = CURRENT_TIMESTAMP
 WHERE COALESCE("isManual", false) = false;
@@ -23,7 +23,7 @@ WHERE COALESCE("isManual", false) = false;
 COMMIT;
 
 SELECT tag, COUNT(*) AS active_rules
-FROM public.crm_pool_rule
+FROM public.pool_rules
 WHERE COALESCE("isActive", true) = true
 GROUP BY tag
 ORDER BY tag;

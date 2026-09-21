@@ -13,7 +13,7 @@ This is **separate** from day-to-day parked nightly (`PARKED_STATE.md`).
 |-----------|----------------|
 | First LD go-live on migrated CRM data | Yes |
 | Boss re-ran Prisma migrate / data refresh | Yes |
-| Re-fill `crm_company_load_sale` from contracts + legacy mappings | Yes |
+| Build past-sale fallback in Databricks from `external_site_mappings` + contracts | Yes (notebook) |
 | Normal nightly after go-live | No — only Databricks **Run all** |
 | Adding one new supplier later | `13_turn_on_supplier_routing.md` → **New supplier** section |
 
@@ -22,7 +22,7 @@ This is **separate** from day-to-day parked nightly (`PARKED_STATE.md`).
 ## Prerequisites
 
 - [ ] Boss **Prisma migrate** applied (`companies`, `pools`, `providers`, `contracts`, … exist).
-- [ ] `legacy_site_mappings` loaded (if you use sourcebridge fallback).
+- [ ] `external_site_mappings` loaded (if you use sourcebridge fallback).
 - [ ] Supabase SQL editor access.
 - [ ] Databricks job can reach Postgres (pooler credentials in notebook).
 
@@ -34,10 +34,10 @@ Copy/paste each file in Supabase. Wait for success before the next.
 
 | Step | File | What it does | Changes `poolId`? |
 |------|------|----------------|-------------------|
-| 1 | **`06_crm_pool_rule_uuid.sql`** | `crm_pool_rule.id` → uuid, unique `tag` | No |
-| 2 | **`04_seed_ld_pools.sql`** | Core shared pools + core `crm_pool_rule` rows | No |
-| 3 | **`16_fallback_from_sourcebridge.sql`** | **Main fallback** — `crm_company_load_sale` from `legacy_site_mappings` + contracts + all companies | No |
-| 4 | **`17_fill_sale_end_date.sql`** | Second pass on `lastDealEndDate` (optional but recommended) | No |
+| 1 | **`06_crm_pool_rule_uuid.sql`** | `pool_rules.id` → uuid, unique `tag` (table renamed in Prisma) | No |
+| 2 | **`04_parked_minimal.sql`** | Parked prod — pools + `pool_rules` only; `provider_families` stays empty | No |
+| 2full | **`04_seed_ld_pools.sql`** | Full seed — use on **supplier turn-on**, not parked go-live | No |
+| — | **Databricks `working_table.py`** | Past-sale fallback built in UC (`snap_crm_company_load_sale`) — skip **16** / **17** in prod | No |
 | 7 | **`10_park_supplier_routing.sql`** | Park suppliers — only Retention rules active | No |
 | 8 | **`11_reclaim_from_parked_pools.sql`** | Move past-sale companies out of supplier/Unassigned → Retention / Past Retention | **Yes** |
 | 9 | **`12_hide_parked_pools_from_agents.sql`** | Hide supplier/Unassigned/Upselling from Pool filter; fix `pool_links` nesting | No (`pool_profiles` only) |
@@ -49,7 +49,9 @@ Copy/paste each file in Supabase. Wait for success before the next.
 
 | File | Why skip |
 |------|----------|
-| **`14_crm_load_source.sql`** | Old site-level load path — we use **`legacy_site_mappings`** + **`16`** instead |
+| **`14_crm_load_source.sql`** | Old site-level load path — we use **`external_site_mappings`** + Databricks fallback |
+| **`16_fallback_from_sourcebridge.sql`** | Dev only — prod builds fallback in Databricks |
+| **`17_fill_sale_end_date.sql`** | Dev only — CED included in notebook fallback |
 | **`15_company_site_load_and_sale.sql`** | Old `crm_company_site_load` — not needed for current nightly |
 | **`09_sync_provider_pools.sql`** | Suppliers parked — run on turn-on (or pre-create pools then re-run **10**) |
 | **`03_wipe_old_ld_pool_ids.sql`** | Cleanup only |
@@ -66,33 +68,20 @@ Copy/paste each file in Supabase. Wait for success before the next.
 
 ---
 
-## Fallback table — what step 5 + 6 do
+## Past-sale fallback (Databricks — not Supabase)
 
-### `16_fallback_from_sourcebridge.sql` (run every migration)
+Each nightly run builds **`crm_load.new_crm.snap_crm_company_load_sale`** from:
 
-Creates/updates **`crm_company_load_sale`** (one row per company):
-
-1. **legacy_site_mappings** where campaign/source looks like retention  
+1. **external_site_mappings** where campaign/source looks like retention  
 2. **Any company** with a contract end date on company / site / meter  
 3. **Every company** row (retention load assumption)
 
 Picks **best CED** per company: Retention window (1–540) beats Past beats far-out.  
-**Does not** change `companies.poolId`.
+**Does not** change `companies.poolId`. No `crm_company_load_sale` table in prod enrichment.
 
-### `17_fill_sale_end_date.sql` (recommended after 16)
+### Verify fallback (Databricks)
 
-Refreshes `lastDealEndDate` from contracts only — same priority logic.  
-Safe to re-run.
-
-### Verify fallback
-
-```sql
-SELECT
-  COUNT(*) AS companies,
-  COUNT("lastDealEndDate") AS with_ced,
-  COUNT(*) - COUNT("lastDealEndDate") AS no_ced
-FROM public.crm_company_load_sale;
-```
+Check notebook output: `snap_crm_company_load_sale (Databricks fallback)` row count, and `with_past_deal` in the working-table summary.
 
 ---
 
@@ -124,9 +113,6 @@ Databricks calls **`ld_janitor_run()`** at the start of each run, then **`ld_app
 ## Post-migration QA
 
 ```sql
--- Fallback populated
-SELECT COUNT(*) FROM public.crm_company_load_sale;
-
 -- Past-sale not stuck in supplier pools
 SELECT COUNT(*) FROM public.companies c
 JOIN public.pools p ON p.id = c."poolId"
@@ -135,7 +121,7 @@ WHERE p.type::text IN ('STANDARD', 'CAMPAIGN')
 
 -- Active rules while parked
 SELECT tag, "isActive"
-FROM public.crm_pool_rule
+FROM public.pool_rules
 WHERE tag IN ('RETENTION', 'PAST_RETENTION', 'UNASSIGNED', 'UPSELLING')
 ORDER BY tag;
 
@@ -154,8 +140,8 @@ HAVING COUNT(pp."profileId") <> 1;
 
 | Script | Safe to re-run? | When |
 |--------|-----------------|------|
-| **`16_fallback_from_sourcebridge.sql`** | Yes | New legacy mapping load, major contract refresh |
-| **`17_fill_sale_end_date.sql`** | Yes | After bulk contract import |
+| **Databricks Run all** | Yes | Rebuilds fallback after mapping / contract refresh |
+| **`16_fallback_from_sourcebridge.sql`** | Dev only | Local Supabase testing |
 | **`11_reclaim_from_parked_pools.sql`** | Yes | Cleanup only — moves past-sale out of parked pools |
 
 **Do not** re-run **11** on a live parked system unless you know companies drifted back into supplier pools.
@@ -166,9 +152,7 @@ HAVING COUNT(pp."profileId") <> 1;
 
 ```
 □ Prisma migrate (boss)
-□ 06 → 04
-□ 16 fallback  ← legacy_site_mappings + crm_company_load_sale (skip 14/15)
-□ 17 fill sale dates
+□ 06 → 04_parked_minimal (not full 04 while parked; provider_families empty)
 □ 10 park suppliers
 □ 11 reclaim → Retentions
 □ 12 hide supplier pools in UI (+ 12a if needed)

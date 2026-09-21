@@ -10,10 +10,12 @@
 # MAGIC When a company enters the retention window, tag flips → apply moves it.
 # MAGIC Supplier / Upselling / Unassigned **pool moves** resume on turn-on (`13_turn_on_supplier_routing.md`).
 # MAGIC
-# MAGIC Per-supplier pools / `09_sync` parked. `crm_provider_family` snapshot empty.
-# MAGIC Re-enable supplier + `crm_provider_family` when campaign routing is ready.
+# MAGIC Per-supplier pools / `09_sync` parked. `provider_families` snapshot empty.
+# MAGIC Re-enable supplier + `provider_families` when campaign routing is ready.
 # MAGIC
-# MAGIC `source_kind` on `ld_working` is read from `legacy_site_mappings`.
+# MAGIC `source_kind` on `ld_working` is read from `external_site_mappings`.
+# MAGIC Past-sale fallback (`snap_crm_company_load_sale`) is built here from
+# MAGIC external mappings + contracts — no Supabase `crm_company_load_sale` table.
 # MAGIC Load origin is the **`campaign` column** (Retention / Supplier) — that is
 # MAGIC NOT the lead-tag Campaign pool (Retentions / Past Retentions / E.ON).
 # MAGIC Still match `LIKE '%retention%'` on `campaign` and `source` just in case.
@@ -95,7 +97,7 @@ for table in [
     "callbacks",
     "pools",
     # "pool_links",  # parked — fair-share to PRIVATE agent bags off for now
-    "crm_pool_rule",
+    "pool_rules",
     "notes",
     "profiles",
     "company_pool_audits",
@@ -107,36 +109,21 @@ for table in [
 
 # Parked — re-enable with 09_sync_provider_pools.sql when supplier pools go live.
 # try:
-#     _fam = jdbc_table("public.crm_provider_family")
+#     _fam = jdbc_table("public.provider_families")
 #     _fam.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-#         "crm_load.new_crm.snap_crm_provider_family"
+#         "crm_load.new_crm.snap_provider_families"
 #     )
-#     print("crm_provider_family", _fam.count())
+#     print("provider_families", _fam.count())
 # except Exception as exc:
-#     print("crm_provider_family skip:", str(exc)[:200])
+#     print("provider_families skip:", str(exc)[:200])
 spark.createDataFrame(
     [],
-    "providerId string, family string, tagCode string, poolId string, "
-    "windowDays int, displayName string, isActive boolean",
+    "id string, providerId string, family string, tagCode string, poolId string, "
+    "windowDays int, displayName string, isActive boolean, isManual boolean",
 ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-    "crm_load.new_crm.snap_crm_provider_family"
+    "crm_load.new_crm.snap_provider_families"
 )
-print("crm_provider_family parked (empty snapshot)")
-
-try:
-    sale = jdbc_table("public.crm_company_load_sale")
-    sale.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_crm_company_load_sale"
-    )
-    print("crm_company_load_sale", sale.count())
-except Exception as e:
-    spark.createDataFrame(
-        [],
-        "companyId string, companySiteId string, source string, hasPastSale boolean, lastDealEndDate date",
-    ).write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-        "crm_load.new_crm.snap_crm_company_load_sale"
-    )
-    print("crm_company_load_sale skip", str(e)[:160])
+print("provider_families parked (empty snapshot)")
 
 # pools.id = UUID; pools.code = stable key (BG, COMPLAINT, …).
 spark.sql(
@@ -150,16 +137,16 @@ spark.sql(
 )
 print("ld_pool_by_code", spark.table("crm_load.new_crm.ld_pool_by_code").count())
 
-# Load origin = legacy_site_mappings.campaign (Retention / Supplier).
+# Load origin = external_site_mappings.campaign (Retention / Supplier).
 # Not the lead-tag Campaign pool. Column `source` still matched just in case.
-maps = jdbc_table("public.legacy_site_mappings")
+maps = jdbc_table("public.external_site_mappings")
 _map_cols = {c.lower(): c for c in maps.columns}
 if "campaign" not in _map_cols:
     maps = maps.withColumn("campaign", F.lit(None).cast("string"))
 maps.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-    "crm_load.new_crm.snap_legacy_site_mappings"
+    "crm_load.new_crm.snap_external_site_mappings"
 )
-print("legacy_site_mappings", maps.count(), maps.columns)
+print("external_site_mappings", maps.count(), maps.columns)
 if "campaign" in {c.lower() for c in maps.columns}:
     print("mapping campaign (load origin, not pool Campaign)")
     maps.groupBy([c for c in maps.columns if c.lower() == "campaign"][0]).count().show(30, False)
@@ -212,6 +199,128 @@ else:
 contracts.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
     "crm_load.new_crm.snap_contracts"
 )
+
+# Temporary fallback (was 16 in Supabase): one row per company from external mappings + CED.
+# Remove when deals fully replace this path.
+spark.sql(
+    """
+    CREATE OR REPLACE TABLE crm_load.new_crm.snap_crm_company_load_sale AS
+    WITH contract_ced AS (
+      SELECT company_id, site_id, end_date
+      FROM (
+        SELECT
+          NULLIF(TRIM(c.`companyId`), '') AS company_id,
+          c.`siteId` AS site_id,
+          CAST(c.`endDate` AS DATE) AS end_date,
+          CASE
+            WHEN CAST(c.`endDate` AS DATE) > CURRENT_DATE()
+              AND DATEDIFF(CAST(c.`endDate` AS DATE), CURRENT_DATE()) <= 540 THEN 0
+            WHEN CAST(c.`endDate` AS DATE) <= CURRENT_DATE() THEN 1
+            ELSE 2
+          END AS bag
+        FROM crm_load.new_crm.snap_contracts c
+        WHERE c.`endDate` IS NOT NULL
+          AND NULLIF(TRIM(c.`companyId`), '') IS NOT NULL
+        UNION ALL
+        SELECT
+          s.`companyId` AS company_id,
+          s.id AS site_id,
+          CAST(c.`endDate` AS DATE) AS end_date,
+          CASE
+            WHEN CAST(c.`endDate` AS DATE) > CURRENT_DATE()
+              AND DATEDIFF(CAST(c.`endDate` AS DATE), CURRENT_DATE()) <= 540 THEN 0
+            WHEN CAST(c.`endDate` AS DATE) <= CURRENT_DATE() THEN 1
+            ELSE 2
+          END AS bag
+        FROM crm_load.new_crm.snap_contracts c
+        JOIN crm_load.new_crm.snap_company_sites s ON s.id = c.`siteId`
+        WHERE c.`endDate` IS NOT NULL AND s.`companyId` IS NOT NULL
+        UNION ALL
+        SELECT
+          s.`companyId` AS company_id,
+          s.id AS site_id,
+          CAST(c.`endDate` AS DATE) AS end_date,
+          CASE
+            WHEN CAST(c.`endDate` AS DATE) > CURRENT_DATE()
+              AND DATEDIFF(CAST(c.`endDate` AS DATE), CURRENT_DATE()) <= 540 THEN 0
+            WHEN CAST(c.`endDate` AS DATE) <= CURRENT_DATE() THEN 1
+            ELSE 2
+          END AS bag
+        FROM crm_load.new_crm.snap_contracts c
+        JOIN crm_load.new_crm.snap_site_meters sm ON sm.id = c.`siteMeterId`
+        JOIN crm_load.new_crm.snap_company_sites s ON s.id = sm.`companySiteId`
+        WHERE c.`endDate` IS NOT NULL AND s.`companyId` IS NOT NULL
+      ) x
+      WHERE company_id IS NOT NULL
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY company_id ORDER BY bag, end_date DESC NULLS LAST
+      ) = 1
+    ),
+    unioned AS (
+      SELECT
+        m.`companyId` AS company_id,
+        COALESCE(ced.site_id, m.`companySiteId`) AS site_id,
+        COALESCE(
+          NULLIF(TRIM(m.campaign), ''),
+          NULLIF(TRIM(m.source), ''),
+          'Retention'
+        ) AS source,
+        ced.end_date,
+        m.`migratedAt` AS migrated_at
+      FROM crm_load.new_crm.snap_external_site_mappings m
+      LEFT JOIN contract_ced ced ON ced.company_id = m.`companyId`
+      WHERE LOWER(COALESCE(m.campaign, m.source, '')) LIKE '%retention%'
+      UNION ALL
+      SELECT
+        ced.company_id,
+        ced.site_id,
+        'Retention' AS source,
+        ced.end_date,
+        CAST(NULL AS TIMESTAMP) AS migrated_at
+      FROM contract_ced ced
+      UNION ALL
+      SELECT
+        co.id AS company_id,
+        ced.site_id,
+        'Retention' AS source,
+        ced.end_date,
+        CAST(NULL AS TIMESTAMP) AS migrated_at
+      FROM crm_load.new_crm.snap_companies co
+      LEFT JOIN contract_ced ced ON ced.company_id = co.id
+    ),
+    ranked AS (
+      SELECT
+        company_id,
+        site_id,
+        source,
+        end_date,
+        ROW_NUMBER() OVER (
+          PARTITION BY company_id
+          ORDER BY
+            CASE WHEN end_date IS NOT NULL THEN 0 ELSE 1 END,
+            CASE
+              WHEN end_date > CURRENT_DATE()
+                AND DATEDIFF(end_date, CURRENT_DATE()) <= 540 THEN 0
+              WHEN end_date <= CURRENT_DATE() THEN 1
+              ELSE 2
+            END,
+            end_date DESC NULLS LAST,
+            migrated_at DESC NULLS LAST
+        ) AS rn
+      FROM unioned
+      WHERE company_id IS NOT NULL
+    )
+    SELECT
+      company_id AS `companyId`,
+      site_id AS `companySiteId`,
+      source,
+      true AS `hasPastSale`,
+      end_date AS `lastDealEndDate`
+    FROM ranked
+    WHERE rn = 1
+    """
+)
+print("snap_crm_company_load_sale (Databricks fallback)", spark.table("crm_load.new_crm.snap_crm_company_load_sale").count())
 
 # Last deal (Prisma): deals.siteMeterId → site_meters → company_sites → company.
 # Clock: that deal's contracts.endDate − today. Dead meters / cancelled still off.
@@ -556,7 +665,7 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC
 # MAGIC `is_win_dfv` is the **winning** contract only (Nightly FVD = contract type).
 # MAGIC No supplier → Other / Unassigned, never E.ON DFV.
-# MAGIC Family / tagCode / windowDays from `crm_provider_family` (09 sync).
+# MAGIC Family / tagCode / windowDays from `provider_families` (09 sync).
 # MAGIC Last deal: Prisma `deals.siteMeterId` → `site_meters` → `company_sites`.
 # MAGIC Days left is still that deal's `contracts.endDate` − today.
 
@@ -642,7 +751,7 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC     ON c.id = cc.contract_id
 # MAGIC   LEFT JOIN crm_load.new_crm.snap_providers p
 # MAGIC     ON c.`providerId` = p.id
-# MAGIC   LEFT JOIN crm_load.new_crm.snap_crm_provider_family f
+# MAGIC   LEFT JOIN crm_load.new_crm.snap_provider_families f
 # MAGIC     ON f.`providerId` = c.`providerId`
 # MAGIC    AND COALESCE(f.`isActive`, true) = true
 # MAGIC   WHERE cc.company_id IS NOT NULL
@@ -754,7 +863,7 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC       CAST(NULL AS STRING) AS site_kind,
 # MAGIC       CAST(NULL AS STRING) AS site_family,
 # MAGIC       CAST(NULL AS STRING) AS site_source_id
-# MAGIC     FROM crm_load.new_crm.snap_legacy_site_mappings m
+# MAGIC     FROM crm_load.new_crm.snap_external_site_mappings m
 # MAGIC     UNION ALL
 # MAGIC     SELECT
 # MAGIC       s.`companyId` AS company_id,
@@ -975,7 +1084,7 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 # MAGIC %md
 # MAGIC ## Step 3 — Propose pool
 # MAGIC
-# MAGIC Tag → **parent** CAMPAIGN (or STANDARD) pool via `crm_pool_rule` (snapshot).
+# MAGIC Tag → **parent** CAMPAIGN (or STANDARD) pool via `pool_rules` (snapshot).
 # MAGIC Fair-share to PRIVATE children is parked (Step 3b). Apply uses shared parent only.
 # MAGIC Sticky still wins: callback / locked stay; complaint uses the rule.
 
@@ -988,13 +1097,13 @@ print("company clock bags (0=Retention 1=Past 2=Upselling)")
 
 # COMMAND ----------
 
-# DBTITLE 1,snapshot crm_pool_rule only
-# Needed if this session already snapshotted without crm_pool_rule.
-_rules = jdbc_table("public.crm_pool_rule")
+# DBTITLE 1,snapshot pool_rules only
+# Needed if this session already snapshotted without pool_rules.
+_rules = jdbc_table("public.pool_rules")
 _rules.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(
-    "crm_load.new_crm.snap_crm_pool_rule"
+    "crm_load.new_crm.snap_pool_rules"
 )
-print("crm_pool_rule", _rules.count())
+print("pool_rules", _rules.count())
 
 # COMMAND ----------
 
@@ -1046,7 +1155,7 @@ print("crm_pool_rule", _rules.count())
 # MAGIC   w.is_protected,
 # MAGIC   w.snapshot_at
 # MAGIC FROM ld_before_pool w
-# MAGIC LEFT JOIN crm_load.new_crm.snap_crm_pool_rule r
+# MAGIC LEFT JOIN crm_load.new_crm.snap_pool_rules r
 # MAGIC   ON r.tag = w.lead_tag
 # MAGIC  AND COALESCE(r.`isActive`, true) = true
 # MAGIC LEFT JOIN crm_load.new_crm.ld_pool_by_code cpool ON cpool.code = 'COMPLAINT'

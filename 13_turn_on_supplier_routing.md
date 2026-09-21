@@ -5,7 +5,7 @@
 
 Use this when boss is ready for **per-supplier pools**, **Unassigned**, and **campaign** routing again.
 
-**Current state (parked):** nightly only moves **Retentions**, **Past Retentions**, **Complaint**, **Callback**. Supplier sync (`09`) and `crm_provider_family` are off. Agent **PRIVATE** pools unchanged.
+**Current state (parked):** nightly only moves **Retentions**, **Past Retentions**, **Complaint**, **Callback**. Supplier sync (`09`) and `provider_families` are off. Agent **PRIVATE** pools unchanged.
 
 ---
 
@@ -21,8 +21,8 @@ Use this when boss is ready for **per-supplier pools**, **Unassigned**, and **ca
 
 | Step | File | What |
 |------|------|------|
-| 1 | **`09_sync_provider_pools.sql`** | Map every `providers` row → `crm_provider_family` + per-supplier pools + `{TAG}_NOW` / `{TAG}_IN_WINDOW` rules |
-| 2 | **Re-activate rules** (see SQL below) | Turn `crm_pool_rule` + `crm_provider_family` back on |
+| 1 | **`09_sync_provider_pools.sql`** | Map every `providers` row → `provider_families` + per-supplier pools + `{TAG}_NOW` / `{TAG}_IN_WINDOW` rules |
+| 2 | **Re-activate rules** (see SQL below) | Turn `pool_rules` + `provider_families` back on |
 | 3 | **`pool_profiles`** (CRM admin) | Link agents to supplier shared pools they should work (BG, E.ON, …) |
 | 4 | Optional: **`05_unlink_private_pool_links.sql`** | Only if fair-share to Jack/Kelly is **off** (current). Skip if turning fair-share on |
 
@@ -31,12 +31,12 @@ Use this when boss is ready for **per-supplier pools**, **Unassigned**, and **ca
 ```sql
 BEGIN;
 
-UPDATE public.crm_provider_family
+UPDATE public.provider_families
 SET "isActive" = true,
     "updatedAt" = CURRENT_TIMESTAMP
 WHERE COALESCE("isManual", false) = false;
 
-UPDATE public.crm_pool_rule
+UPDATE public.pool_rules
 SET "isActive" = true,
     "updatedAt" = CURRENT_TIMESTAMP
 WHERE tag NOT IN ('COMPLAINT', 'CALLBACK', 'RETENTION', 'PAST_RETENTION');
@@ -47,10 +47,10 @@ COMMIT;
 Check:
 
 ```sql
-SELECT tag, COUNT(*) FROM public.crm_pool_rule
+SELECT tag, COUNT(*) FROM public.pool_rules
 WHERE "isActive" = true GROUP BY tag ORDER BY tag;
 
-SELECT COUNT(*) FROM public.crm_provider_family WHERE "isActive" = true;
+SELECT COUNT(*) FROM public.provider_families WHERE "isActive" = true;
 ```
 
 ---
@@ -59,7 +59,7 @@ SELECT COUNT(*) FROM public.crm_provider_family WHERE "isActive" = true;
 
 | Step | Change |
 |------|--------|
-| 1 | **Uncomment** `crm_provider_family` snapshot (replace empty parked snapshot) |
+| 1 | **Uncomment** `provider_families` snapshot (replace empty parked snapshot) |
 | 2 | **Propose pool** — restore supplier + Unassigned fallback (remove “retention only” `ELSE NULL`) |
 | 3 | **Apply batch** — include supplier tags again (`BG_NOW`, `EON_IN_WINDOW`, …, `PRE_WINDOW` → Unassigned) |
 | 4 | Optional: **fair-share** — uncomment `pool_links` snapshot + `_FAIR_SHARE_SQL` (private agent bags) |
@@ -134,7 +134,7 @@ When **fair-share** is on (Kelly linked to Retentions / Past Retentions):
 
 ```
 1. 09_sync_provider_pools.sql
-2. Re-activate SQL (crm_pool_rule + crm_provider_family)
+2. Re-activate SQL (pool_rules + provider_families)
 3. pool_profiles — agents on supplier pools
 4. Git pull working_table.py — uncomment provider snapshot + full apply
 5. apply_ld_apply_batch.sql — already deployed

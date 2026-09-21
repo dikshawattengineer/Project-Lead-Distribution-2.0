@@ -19,7 +19,7 @@ Use when a new energy supplier appears in CRM but you are **not** routing leads 
 |------|-----|--------|
 | 1 | **CRM / boss** | New row in `public.providers` (normal Prisma flow). |
 | 2 | **You** | **Do not** run full turn-on. Optionally pre-create LD objects: |
-| 2a | | Run **`09_sync_provider_pools.sql`** once (creates `pools` row, `crm_provider_family`, `{TAG}_NOW` / `{TAG}_IN_WINDOW` rules). |
+| 2a | | Run **`09_sync_provider_pools.sql`** once (creates `pools` row, `provider_families`, `{TAG}_NOW` / `{TAG}_IN_WINDOW` rules). |
 | 2b | | Run **`10_park_supplier_routing.sql`** again so new rules stay **inactive**. |
 | 3 | **You** | **Do not** add `pool_profiles` for agents yet (Pool filter stays Retentions + private bags). |
 | 4 | **Databricks** | No change — still parked apply. |
@@ -30,7 +30,7 @@ Use when a new energy supplier appears in CRM but you are **not** routing leads 
 SELECT p.code, p.name FROM public.pools p
 WHERE p.code = 'NEW_SUPPLIER_CODE';  -- tag_code from 09
 
-SELECT tag, "isActive" FROM public.crm_pool_rule
+SELECT tag, "isActive" FROM public.pool_rules
 WHERE tag LIKE 'NEW_SUPPLIER_CODE%';
 -- Expect isActive = false after step 2b
 ```
@@ -46,7 +46,7 @@ Use when boss says go live with per-supplier pools, Unassigned, Upselling.
 ### Before you start
 
 - [ ] `04_seed_ld_pools.sql` ran (core pools + rules).  
-- [ ] `06_crm_pool_rule_uuid.sql` ran if migrating from `ld_rule_*` ids.  
+- [ ] `06_pool_rules_uuid.sql` ran if migrating from `ld_rule_*` ids.  
 - [ ] `apply_ld_apply_batch.sql` deployed.  
 - [ ] Any **new** `providers` rows exist in CRM.  
 - [ ] `RELEASE_MIGRATION.md` fallback (**16** + **17**) already done if this is first go-live.
@@ -57,7 +57,7 @@ Use when boss says go live with per-supplier pools, Unassigned, Upselling.
 
 | Step | File / action |
 |------|----------------|
-| **1** | **`09_sync_provider_pools.sql`** — every `providers` row → pool + `crm_provider_family` + NOW/IN_WINDOW rules (uuid ids, upsert on `tag`). |
+| **1** | **`09_sync_provider_pools.sql`** — every `providers` row → pool + `provider_families` + NOW/IN_WINDOW rules (uuid ids, upsert on `tag`). |
 | **2** | **Re-activate routing** (SQL below). |
 | **3** | **`12_revert_hide_parked_pools.sql`** OR manually add `pool_profiles` so agents see supplier pools they work. |
 | **4** | **CRM admin** — link agents to supplier shared pools in `pool_profiles` (not Retention / private). |
@@ -68,12 +68,12 @@ Use when boss says go live with per-supplier pools, Unassigned, Upselling.
 ```sql
 BEGIN;
 
-UPDATE public.crm_provider_family
+UPDATE public.provider_families
 SET "isActive" = true,
     "updatedAt" = CURRENT_TIMESTAMP
 WHERE COALESCE("isManual", false) = false;
 
-UPDATE public.crm_pool_rule
+UPDATE public.pool_rules
 SET "isActive" = true,
     "updatedAt" = CURRENT_TIMESTAMP
 WHERE tag NOT IN ('COMPLAINT', 'CALLBACK', 'RETENTION', 'PAST_RETENTION');
@@ -84,10 +84,10 @@ COMMIT;
 #### Verify
 
 ```sql
-SELECT tag, COUNT(*) FROM public.crm_pool_rule
+SELECT tag, COUNT(*) FROM public.pool_rules
 WHERE "isActive" = true GROUP BY tag ORDER BY tag;
 
-SELECT COUNT(*) FROM public.crm_provider_family WHERE "isActive" = true;
+SELECT COUNT(*) FROM public.provider_families WHERE "isActive" = true;
 ```
 
 ---
@@ -96,7 +96,7 @@ SELECT COUNT(*) FROM public.crm_provider_family WHERE "isActive" = true;
 
 | Step | Change |
 |------|--------|
-| 1 | **Uncomment** `crm_provider_family` JDBC snapshot (remove empty parked dataframe). |
+| 1 | **Uncomment** `provider_families` JDBC snapshot (remove empty parked dataframe). |
 | 2 | **Propose pool** — change `fill proposed_pool_id` so non-retention tags use `r.poolId` / Unassigned fallback (not `ELSE NULL`). See `13_turn_on_supplier_routing.md`. |
 | 3 | **Apply batch** — remove `PARKED_APPLY_TAGS` filter or expand to all supplier tags; or use `proposed_pool_id IS NOT NULL` only. |
 | 4 | **Fair-share (optional)** — uncomment `pool_links` snapshot + `spark.sql(_FAIR_SHARE_SQL)`. |
@@ -133,7 +133,7 @@ GROUP BY lead_tag ORDER BY COUNT(*) DESC;
 | 3 | New rules are inserted **`isActive = true`** by 09 — no **10** needed. |
 | 4 | Add **`pool_profiles`** for agents who work that supplier. |
 | 5 | Next **Databricks Run all** — no code change if full routing already on. |
-| 6 | QA: `SELECT tag, "isActive" FROM crm_pool_rule WHERE tag LIKE 'NEW_TAG%';` |
+| 6 | QA: `SELECT tag, "isActive" FROM pool_rules WHERE tag LIKE 'NEW_TAG%';` |
 
 ---
 

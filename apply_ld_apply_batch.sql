@@ -20,7 +20,7 @@ BEGIN
   UPDATE public.pools
   SET type = 'CAMPAIGN'::pool_type, "updatedAt" = CURRENT_TIMESTAMP
   WHERE EXISTS (
-      SELECT 1 FROM public.crm_pool_rule r
+      SELECT 1 FROM public.pool_rules r
       WHERE r."poolId" = pools.id AND COALESCE(r."isActive", true) = true
     )
     AND type::text <> 'PRIVATE';

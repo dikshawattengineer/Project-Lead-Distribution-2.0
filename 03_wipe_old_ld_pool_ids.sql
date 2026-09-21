@@ -4,25 +4,11 @@
 
 BEGIN;
 
-DELETE FROM public.crm_pool_rule
+DELETE FROM public.pool_rules
 WHERE "poolId" IN (SELECT id FROM public.pools WHERE id LIKE 'ld_pool_%');
 
--- poolId on crm_provider_family only exists after 09 schema — clear whole table if missing
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'crm_provider_family'
-      AND column_name = 'poolId'
-  ) THEN
-    DELETE FROM public.crm_provider_family
-    WHERE "poolId" IN (SELECT id FROM public.pools WHERE id LIKE 'ld_pool_%');
-  ELSE
-    DELETE FROM public.crm_provider_family;
-  END IF;
-END $$;
+DELETE FROM public.provider_families
+WHERE "poolId" IN (SELECT id FROM public.pools WHERE id LIKE 'ld_pool_%');
 
 DELETE FROM public.pools
 WHERE id LIKE 'ld_pool_%';

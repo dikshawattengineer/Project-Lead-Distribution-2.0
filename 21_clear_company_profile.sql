@@ -20,7 +20,7 @@ SELECT
   COUNT(*) FILTER (WHERE "profileId" IS NOT NULL) AS still_have_agent,
   COUNT(*) FILTER (
     WHERE EXISTS (
-      SELECT 1 FROM public.crm_pool_rule r
+      SELECT 1 FROM public.pool_rules r
       WHERE r."poolId" = companies."poolId"
         AND COALESCE(r."isActive", true) = true
     )

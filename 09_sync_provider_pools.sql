@@ -1,57 +1,13 @@
 -- Sync every providers row → routing map + pool (UUID) + NOW/IN_WINDOW rules.
 -- pools.id = gen_random_uuid(); pools.code = stable key (BG, YU_ENERGY, …).
--- crm_pool_rule.id = uuid; upsert key = tag (e.g. YU_ENERGY_NOW). Run 06 first on existing DBs.
+-- pool_rules.id = uuid; upsert key = tag (e.g. YU_ENERGY_NOW). Run 06 first on existing DBs.
 -- Run after 04_seed_ld_pools.sql. Safe to re-run. Does not change companies.poolId.
 -- Skip while parked — update now so turn-on day is ready.
 
 BEGIN;
 
-CREATE UNIQUE INDEX IF NOT EXISTS crm_pool_rule_tag_uidx
-  ON public.crm_pool_rule (tag);
-
-CREATE TABLE IF NOT EXISTS public.crm_provider_family (
-  "providerId"   text PRIMARY KEY
-    REFERENCES public.providers(id),
-  family         text NOT NULL,
-  "tagCode"      text NOT NULL,
-  "poolId"       text NOT NULL
-    REFERENCES public.pools(id),
-  "windowDays"   integer NOT NULL DEFAULT 365,
-  "displayName"  text,
-  "isActive"     boolean NOT NULL DEFAULT true,
-  "isManual"     boolean NOT NULL DEFAULT false,
-  "matchedPattern" text,
-  "createdAt"    timestamp without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "updatedAt"    timestamp without time zone NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-ALTER TABLE public.crm_provider_family
-  ADD COLUMN IF NOT EXISTS "tagCode" text;
-ALTER TABLE public.crm_provider_family
-  ADD COLUMN IF NOT EXISTS "poolId" text;
-ALTER TABLE public.crm_provider_family
-  ADD COLUMN IF NOT EXISTS "windowDays" integer NOT NULL DEFAULT 365;
-ALTER TABLE public.crm_provider_family
-  ADD COLUMN IF NOT EXISTS "isManual" boolean NOT NULL DEFAULT false;
-ALTER TABLE public.crm_provider_family
-  ADD COLUMN IF NOT EXISTS "matchedPattern" text;
-
-DO $$
-DECLARE
-  cname text;
-BEGIN
-  SELECT con.conname INTO cname
-  FROM pg_constraint con
-  JOIN pg_class rel ON rel.oid = con.conrelid
-  JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
-  WHERE nsp.nspname = 'public'
-    AND rel.relname = 'crm_provider_family'
-    AND con.contype = 'c'
-    AND pg_get_constraintdef(con.oid) ILIKE '%family%';
-  IF cname IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE public.crm_provider_family DROP CONSTRAINT %I', cname);
-  END IF;
-END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS pool_rules_tag_uidx
+  ON public.pool_rules (tag);
 
 CREATE UNIQUE INDEX IF NOT EXISTS pools_code_uidx
   ON public.pools (code)
@@ -198,11 +154,16 @@ ON CONFLICT (code) DO UPDATE SET
   name = EXCLUDED.name,
   "updatedAt" = CURRENT_TIMESTAMP;
 
-INSERT INTO public.crm_provider_family
-  ("providerId", family, "tagCode", "poolId", "windowDays", "displayName",
-   "isActive", "isManual", "matchedPattern", "createdAt", "updatedAt")
+DELETE FROM public.provider_families pf
+USING ld_provider_route r
+WHERE pf."providerId" = r.provider_id
+  AND COALESCE(pf."isManual", false) = false;
+
+INSERT INTO public.provider_families
+  (id, family, "tagCode", "poolId", "windowDays", "displayName",
+   "isActive", "isManual", "matchedPattern", "providerId", "createdAt", "updatedAt")
 SELECT
-  r.provider_id,
+  gen_random_uuid(),
   r.bucket,
   r.tag_code,
   p.id,
@@ -211,19 +172,30 @@ SELECT
   true,
   false,
   r.bucket,
+  r.provider_id,
   CURRENT_TIMESTAMP,
   CURRENT_TIMESTAMP
 FROM ld_provider_route r
 JOIN public.pools p ON p.code = r.pool_code
-ON CONFLICT ("providerId") DO UPDATE SET
-  family = EXCLUDED.family,
-  "tagCode" = EXCLUDED."tagCode",
-  "poolId" = EXCLUDED."poolId",
-  "windowDays" = EXCLUDED."windowDays",
-  "displayName" = EXCLUDED."displayName",
-  "matchedPattern" = EXCLUDED."matchedPattern",
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM public.provider_families pf
+  WHERE pf."providerId" = r.provider_id
+);
+
+UPDATE public.provider_families pf
+SET
+  family = r.bucket,
+  "tagCode" = r.tag_code,
+  "poolId" = p.id,
+  "windowDays" = r.window_days,
+  "displayName" = r.display_name,
+  "matchedPattern" = r.bucket,
   "updatedAt" = CURRENT_TIMESTAMP
-WHERE crm_provider_family."isManual" = false;
+FROM ld_provider_route r
+JOIN public.pools p ON p.code = r.pool_code
+WHERE pf."providerId" = r.provider_id
+  AND COALESCE(pf."isManual", false) = false;
 
 WITH tags AS (
   SELECT DISTINCT tag_code, pool_code, window_days
@@ -234,7 +206,7 @@ numbered AS (
   SELECT t.*, 200 + ROW_NUMBER() OVER (ORDER BY t.tag_code) * 2 AS pri_now
   FROM tags t
 )
-INSERT INTO public.crm_pool_rule
+INSERT INTO public.pool_rules
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 SELECT
   gen_random_uuid(),
@@ -264,7 +236,7 @@ numbered AS (
   SELECT t.*, 201 + ROW_NUMBER() OVER (ORDER BY t.tag_code) * 2 AS pri_in
   FROM tags t
 )
-INSERT INTO public.crm_pool_rule
+INSERT INTO public.pool_rules
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 SELECT
   gen_random_uuid(),
@@ -286,13 +258,13 @@ ON CONFLICT (tag) DO UPDATE SET
   "updatedAt" = CURRENT_TIMESTAMP;
 
 SELECT family AS bucket, COUNT(*) AS providers
-FROM public.crm_provider_family
+FROM public.provider_families
 WHERE "isActive" = true
 GROUP BY family
 ORDER BY providers DESC;
 
 SELECT COUNT(*) AS supplier_now_rules
-FROM public.crm_pool_rule
+FROM public.pool_rules
 WHERE tag LIKE '%_NOW'
   AND tag NOT IN (
     'EON_NOW', 'BG_NOW', 'UB_NOW', 'OTHER_NOW',

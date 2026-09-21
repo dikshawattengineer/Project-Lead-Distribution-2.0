@@ -31,9 +31,8 @@
 --   company_pool_audits         who moved the company
 --
 -- Tables / functions this script family owns:
---   crm_provider_family
---   crm_provider_family_pattern
---   crm_pool_rule
+--   provider_families
+--   pool_rules
 --   crm_pool_split_policy
 --   crm_pool_split_filter
 --   crm_pool_member

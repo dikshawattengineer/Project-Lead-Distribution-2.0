@@ -1,6 +1,7 @@
--- Lead distribution shared pools: id = UUID v4, code = stable key.
--- Run once on a fresh DB (or after removing old ld_pool_* rows).
--- Safe to re-run (upsert on pools.code, crm_pool_rule.tag).
+-- FULL seed — all shared pools + supplier family rules (E.ON, BG, UB, Other, …).
+-- Parked prod go-live: use 04_parked_minimal.sql instead (managers only see needed pools).
+-- Run this on supplier turn-on day (before or with 09_sync_provider_pools.sql).
+-- Safe to re-run (upsert on pools.code, pool_rules.tag).
 
 BEGIN;
 
@@ -8,12 +9,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS pools_code_uidx
   ON public.pools (code)
   WHERE code IS NOT NULL;
 
-DROP INDEX IF EXISTS public.crm_pool_rule_priority_uidx;
-CREATE INDEX IF NOT EXISTS crm_pool_rule_priority_idx
-  ON public.crm_pool_rule (priority);
+DROP INDEX IF EXISTS public.pool_rules_priority_uidx;
+CREATE INDEX IF NOT EXISTS pool_rules_priority_idx
+  ON public.pool_rules (priority);
 
-CREATE UNIQUE INDEX IF NOT EXISTS crm_pool_rule_tag_uidx
-  ON public.crm_pool_rule (tag);
+CREATE UNIQUE INDEX IF NOT EXISTS pool_rules_tag_uidx
+  ON public.pool_rules (tag);
 
 INSERT INTO public.pools (id, code, name, type, "isLocked", "createdAt", "updatedAt")
 SELECT
@@ -45,7 +46,7 @@ ON CONFLICT (code) DO UPDATE SET
   "isLocked" = EXCLUDED."isLocked",
   "updatedAt" = CURRENT_TIMESTAMP;
 
-INSERT INTO public.crm_pool_rule
+INSERT INTO public.pool_rules
   (id, priority, tag, "poolId", "isActive", description, "splitEnabled", "createdAt", "updatedAt")
 SELECT
   gen_random_uuid(),

@@ -1,7 +1,7 @@
 -- One-time (safe to re-run): pull companies OUT of parked shared pools
 -- (supplier, Unassigned, Upselling, …) into Retentions or Past Retentions only.
 -- Far-future CED (541+ days) stays put — Unassigned apply is off while parked.
--- Only companies with a past sale (deals or crm_company_load_sale).
+-- Only companies with a past sale (deals, external_site_mappings, or all retention load).
 -- PRIVATE agent pools are not touched. Run after 10_park_supplier_routing.sql.
 -- Then run Databricks to refresh placements / audits.
 
@@ -49,7 +49,11 @@ SELECT DISTINCT company_id
 FROM (
   SELECT d."companyId" AS company_id FROM public.deals d WHERE d."companyId" IS NOT NULL
   UNION
-  SELECT ls."companyId" FROM public.crm_company_load_sale ls
+  SELECT m."companyId" AS company_id
+  FROM public.external_site_mappings m
+  WHERE LOWER(COALESCE(m.campaign, m.source, '')) LIKE '%retention%'
+  UNION
+  SELECT co.id AS company_id FROM public.companies co
 ) s
 WHERE company_id IS NOT NULL;
 

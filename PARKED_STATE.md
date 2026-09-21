@@ -32,11 +32,12 @@ Databricks working_table.py (Run all)
 | Order | File | Purpose |
 |-------|------|---------|
 | 0 | Boss Prisma migrate | App tables |
-| 0b | `06_crm_pool_rule_uuid.sql` | `crm_pool_rule.id` → uuid, unique `tag` (existing DBs) |
-| 1 | `04_seed_ld_pools.sql` | Core pools + rules (upsert on `pools.code`, `crm_pool_rule.tag`) |
-| — | `16_fallback_from_sourcebridge.sql` | Past-sale fallback (`legacy_site_mappings` — skip **14** / **15**) |
+| 0b | `06_pool_rules_uuid.sql` | `pool_rules.id` → uuid, unique `tag` (existing DBs) |
+| 1 | `04_parked_minimal.sql` | **Parked prod** — Retentions, Past, Complaint, Unassigned, Upselling, Customer Care only (`04_POOL_SEEDS.md`) |
+| 1full | `04_seed_ld_pools.sql` | **Turn-on** — all supplier pools + rules |
+| — | Databricks `working_table.py` | Past-sale fallback from `external_site_mappings` (skip **14** / **15** / **16**) |
 | — | `09_sync_provider_pools.sql` | **SKIP while parked** (script updated for turn-on day) |
-| 2 | `10_park_supplier_routing.sql` | Deactivate supplier rules + `crm_provider_family` |
+| 2 | `10_park_supplier_routing.sql` | Deactivate supplier rules + `provider_families` |
 | 3 | `11_reclaim_from_parked_pools.sql` | Past-sale cos in parked pools → Retention (1–540) or Past Retention (expired only); far-future left alone |
 | 3b | `11b_far_future_out_of_past_retention.sql` | **If old 11 ran:** move 541+ CED cos out of Past Retentions → Unassigned (nightly does not write there) |
 | 4 | `12_hide_parked_pools_from_agents.sql` | Hide supplier/Unassigned/Upselling from Pool filter |
@@ -54,11 +55,11 @@ Databricks working_table.py (Run all)
 
 | Item | Status |
 |------|--------|
-| `crm_pool_rule` **RETENTION**, **PAST_RETENTION**, **COMPLAINT** | `isActive = true` |
+| `pool_rules` **RETENTION**, **PAST_RETENTION**, **COMPLAINT** | `isActive = true` |
 | Supplier / Unassigned / Upselling / Corporate / Customer Care rules | `isActive = false` |
-| `crm_provider_family` | `isActive = false` |
+| `provider_families` | `isActive = false` |
 | `pool_links` (fair-share) | `isActive = false` |
-| Databricks `crm_provider_family` snapshot | Empty (parked) |
+| Databricks `provider_families` snapshot | Empty (parked) |
 | Databricks fair-share SQL | Commented out |
 | Databricks apply tags | `RETENTION`, `PAST_RETENTION`, `COMPLAINT`, `CALLBACK` only |
 
@@ -82,12 +83,12 @@ Databricks working_table.py (Run all)
 
 | LD owns (seed / ETL) | Prisma / CRM owns |
 |----------------------|-------------------|
-| `crm_pool_rule` | `pools`, `companies`, `profiles` |
-| `crm_provider_family` | `pool_profiles`, `pool_links` |
+| `pool_rules` | `pools`, `companies`, `profiles` |
+| `provider_families` | `pool_profiles`, `pool_links` |
 | `ld_apply_batch`, `ld_apply_batch_run()` | `company_pool_placements`, `company_pool_audits` |
 | | `callbacks`, `contracts`, `providers` |
 
-**Boss Prisma models needed:** `crm_pool_rule`, `crm_provider_family`  
+**Boss Prisma models needed:** `pool_rules`, `provider_families`  
 - `id` = uuid; stable key = **`tag`** (not `ld_rule_*` text).
 
 ---
@@ -154,7 +155,7 @@ When the callback is completed/cancelled (no longer `SCHEDULED`), normal **Reten
 
 ```sql
 -- Active rules
-SELECT tag, "isActive" FROM public.crm_pool_rule
+SELECT tag, "isActive" FROM public.pool_rules
 WHERE tag IN ('RETENTION', 'PAST_RETENTION', 'UNASSIGNED', 'UPSELLING')
 ORDER BY tag;
 

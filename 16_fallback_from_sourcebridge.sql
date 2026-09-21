@@ -1,4 +1,6 @@
--- Fallback: every retention-source lead → crm_company_load_sale
+-- DEV / REFERENCE ONLY — production builds this in Databricks (working_table.py).
+-- Past-sale fallback: external_site_mappings + contracts + all companies.
+-- Do NOT create public.crm_company_load_sale in prod enrichment.
 --
 -- Looks at every site / meter on the company (empty meters ignored).
 -- Retention always wins over Past Retention and Upselling:
@@ -8,14 +10,9 @@
 --   4) no CED on any meter → Past Retention
 --
 -- Who is inserted:
---   1) legacy_site_mappings — load origin is column "campaign"
---      (Retention / Supplier). That is NOT the lead-tag Campaign pool.
---      Still LIKE '%retention%' on campaign and source just in case.
+--   1) external_site_mappings — load origin is column "campaign"
 --   2) any meter with an endDate
 --   3) every public.companies row (this load is all retention)
---
--- Do not use crm_load_source.
--- Safe to re-run. Does not change poolId.
 
 BEGIN;
 
@@ -42,7 +39,6 @@ SELECT DISTINCT ON (company_id)
   site_id,
   end_date
 FROM (
-  -- companyId on the contract
   SELECT
     NULLIF(BTRIM(c."companyId"), '') AS company_id,
     c."siteId" AS site_id,
@@ -50,10 +46,7 @@ FROM (
   FROM public.contracts c
   WHERE c."endDate" IS NOT NULL
     AND NULLIF(BTRIM(c."companyId"), '') IS NOT NULL
-
   UNION ALL
-
-  -- siteId → company_sites
   SELECT
     s."companyId" AS company_id,
     s.id AS site_id,
@@ -63,10 +56,7 @@ FROM (
     ON s.id = c."siteId"
   WHERE c."endDate" IS NOT NULL
     AND s."companyId" IS NOT NULL
-
   UNION ALL
-
-  -- siteMeterId → site_meters → company_sites (current meter contracts)
   SELECT
     s."companyId" AS company_id,
     s.id AS site_id,
@@ -99,8 +89,6 @@ SELECT DISTINCT ON (u.company_id)
   u.end_date,
   CURRENT_TIMESTAMP
 FROM (
-  -- 1) Retention rows from legacy_site_mappings
-  --    campaign = load origin (Retention / Supplier), not pool Campaign
   SELECT
     m."companyId" AS company_id,
     COALESCE(ced.site_id, m."companySiteId") AS site_id,
@@ -111,14 +99,11 @@ FROM (
     ) AS source,
     ced.end_date,
     m."migratedAt" AS migrated_at
-  FROM public.legacy_site_mappings m
+  FROM public.external_site_mappings m
   LEFT JOIN ld_contract_ced ced
     ON ced.company_id = m."companyId"
   WHERE LOWER(COALESCE(m.campaign, m.source, '')) LIKE '%retention%'
-
   UNION ALL
-
-  -- 2) Keep until migration — any company with an endDate on at least one meter
   SELECT
     ced.company_id,
     ced.site_id,
@@ -126,10 +111,7 @@ FROM (
     ced.end_date,
     NULL::timestamp AS migrated_at
   FROM ld_contract_ced ced
-
   UNION ALL
-
-  -- 3) This load is all retention — every company, even if mapping/CED did not join
   SELECT
     co.id AS company_id,
     ced.site_id,
