@@ -1,8 +1,8 @@
 -- Cron-safe apply. Same SQL every night after Databricks writes public.ld_apply_batch.
 -- Empty batch = 0 pool moves (not an error).
 -- Writes STANDARD parents, or PRIVATE children that are active in pool_links.
--- Campaign = placements.sourcePoolId only when child pool != parent (private link).
--- Shared-only moves: sourcePoolId stays NULL (Pool column is enough).
+-- Campaign = placements.sourcePoolId from proposed_campaign_id (shared + private).
+-- Shared: campaign often equals pool; private: campaign = parent shared pool.
 -- Does not set profileId.
 
 CREATE TABLE IF NOT EXISTS public.ld_apply_batch (
@@ -118,12 +118,7 @@ BEGIN
       gen_random_uuid()::text,
       moved.id,
       moved.proposed_pool_id,
-      CASE
-        WHEN moved.proposed_campaign_id IS NOT NULL
-         AND moved.proposed_campaign_id IS DISTINCT FROM moved.proposed_pool_id
-        THEN moved.proposed_campaign_id
-        ELSE NULL
-      END,
+      moved.proposed_campaign_id,
       NOW(),
       NULL,
       actor
@@ -146,13 +141,12 @@ BEGIN
   )
   SELECT COUNT(*) INTO n FROM audited;
 
-  -- Private child only: parent campaign can change while Kelly's bag stays the same.
+  -- Shared + private: refresh campaign on open placement (pool may stay same).
   UPDATE public.company_pool_placements pl
   SET "sourcePoolId" = x.proposed_campaign_id
   FROM (
     SELECT
       b.company_id,
-      b.proposed_pool_id,
       COALESCE(
         NULLIF(b.proposed_campaign_id, ''),
         CASE WHEN p.type::text IN ('STANDARD', 'CAMPAIGN') THEN b.proposed_pool_id END
@@ -163,7 +157,6 @@ BEGIN
   WHERE pl."companyId" = x.company_id
     AND pl."endedAt" IS NULL
     AND x.proposed_campaign_id IS NOT NULL
-    AND x.proposed_campaign_id IS DISTINCT FROM x.proposed_pool_id
     AND pl."sourcePoolId" IS DISTINCT FROM x.proposed_campaign_id;
 
   RETURN n;

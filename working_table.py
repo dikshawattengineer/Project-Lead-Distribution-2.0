@@ -1205,7 +1205,18 @@ print("pool_rules", _rules.count())
 # MAGIC   current_pool_id,
 # MAGIC   lead_tag,
 # MAGIC   proposed_pool_id,
-# MAGIC   proposed_pool_id AS parent_pool_id,
+# MAGIC   CASE
+# MAGIC     WHEN lead_tag = 'CALLBACK' THEN
+# MAGIC       CASE
+# MAGIC         WHEN last_deal_raw_days_left BETWEEN 1 AND 540 THEN
+# MAGIC           (SELECT pool_id FROM crm_load.new_crm.ld_pool_by_code WHERE code = 'RETENTION' LIMIT 1)
+# MAGIC         WHEN last_deal_raw_days_left IS NULL OR last_deal_days_left < 1 THEN
+# MAGIC           (SELECT pool_id FROM crm_load.new_crm.ld_pool_by_code WHERE code = 'PAST_RETENTION' LIMIT 1)
+# MAGIC         ELSE
+# MAGIC           (SELECT pool_id FROM crm_load.new_crm.ld_pool_by_code WHERE code = 'UNASSIGNED' LIMIT 1)
+# MAGIC       END
+# MAGIC     ELSE proposed_pool_id
+# MAGIC   END AS parent_pool_id,
 # MAGIC   site_count,
 # MAGIC   win_provider_id,
 # MAGIC   win_provider_name,
